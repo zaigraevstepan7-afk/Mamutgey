@@ -3,6 +3,7 @@
 #include "offsets.h"
 #include <mutex>
 #include <vector>
+#include <atomic>
 
 struct EspPlayer {
     void* player = nullptr;
@@ -22,16 +23,14 @@ struct EspPlayer {
 };
 
 struct CheatState {
-    bool menuOpen = false;
-    bool espEnabled = true;
-    bool murderEspEnabled = true;
-    bool espBox = true;
-    bool espLine = true;
-    bool espName = true;
-    bool espDistance = true;
-    bool espRole = true;
-    bool hideDead = true;
-    float boxThickness = 2.0f;
+    std::atomic<bool> espEnabled{true};
+    std::atomic<bool> murderEspEnabled{true};
+    std::atomic<bool> espBox{true};
+    std::atomic<bool> espLine{true};
+    std::atomic<bool> espName{true};
+    std::atomic<bool> espDistance{true};
+    std::atomic<bool> espRole{true};
+    std::atomic<bool> hideDead{true};
 };
 
 inline CheatState g_Cheat;
@@ -39,5 +38,5 @@ inline std::mutex g_EspMutex;
 inline std::vector<EspPlayer> g_EspSnapshot;
 
 bool Il2CppReady();
-void Game_TickCollect(); // gather players for ESP (safe-ish to call from render)
+void Game_TickCollect();
 uintptr_t FindLibBase(const char* name);

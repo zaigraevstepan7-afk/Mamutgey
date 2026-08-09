@@ -50,7 +50,8 @@ public class AuOverlay {
     };
 
     public static native int nativeEspCount();
-    public static native void nativeEspFill(float[] buf);
+    /** @return number of ESP entries written into buf (stride 10) */
+    public static native int nativeEspFill(float[] buf);
     public static native String nativeEspLabel(int index);
     public static native void nativeSetEsp(boolean v);
     public static native void nativeSetMurderEsp(boolean v);
@@ -334,11 +335,11 @@ public class AuOverlay {
         }
 
         @Override protected void onDraw(Canvas canvas) {
+            // Use fill return count (count()+fill() raced / soft-cull desync).
             int n;
-            try { n = nativeEspCount(); } catch (Throwable t) { return; }
+            try { n = nativeEspFill(buf); } catch (Throwable t) { return; }
             if (n <= 0) return;
             if (n > 16) n = 16;
-            try { nativeEspFill(buf); } catch (Throwable t) { return; }
 
             float midX = getWidth() * 0.5f;
             float baseY = getHeight() * 0.88f;

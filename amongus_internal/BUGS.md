@@ -10,36 +10,33 @@
 | Game APK (dump source) | https://d.apkpure.net/b/XAPK/com.innersloth.spacemafia?version=latest |
 
 ```bash
-# quick get
 curl -L -o libau_internal.so \
   "https://github.com/zaigraevstepan7-afk/Mamutgey/raw/cursor/amongus-internal-esp-0381/amongus_internal/libs/arm64-v8a/libau_internal.so"
 adb push libau_internal.so /data/local/tmp/
+adb shell am force-stop com.innersloth.spacemafia
+# start game, then inject ONCE:
 adb shell /data/local/tmp/AndKittyInjector \
   --package com.innersloth.spacemafia \
   --libs /data/local/tmp/libau_internal.so
 ```
 
-## Bugs found & fixed in this pass
+Logcat marker for this build: `BUILD=20260809f bugfix`
 
-### Critical (fixed)
-1. **DisplaySize set after NewFrame** — hit-testing / menu clicks wrong. Now set before `NewFrame`.
-2. **DeltaTime never set** — ImGui timers/hover broken. Now computed each frame.
-3. **GL state not saved/restored** — Unity render corruption / flicker. Backup+restore around ImGui.
-4. **ImGui init ignored failure** — GLES2 games would soft-break. Check `ImGui_ImplOpenGL3_Init`, pick `#version 100` vs `300 es`.
-5. **Wrong `Transform_get_position_Injected` in offsets.h** — was `0x44565A0` (get) instead of `0x44565FC`.
-6. **Double HackThread** — separate atomics in ctor/`JNI_OnLoad` could start two threads. Shared `StartHackOnce()`.
-7. **Naive ARM64 trampoline on PC-relative prologues** — would crash. Reject unsafe first-16-byte patterns.
-8. **List OOB** — no check `size <= max_length`. Added.
-9. **Dangling RoleBehaviour / Data** — read without `IsUnityAlive`. Added.
+## Bugs fixed in 20260809f
 
-### Remaining risks (not fully eliminable in this design)
-1. **IL2CPP calls from GL thread** — `eglSwapBuffers` ≠ Unity main thread; rare crashes possible under load.
-2. **Touch hook may fail** — modern Unity can bind `nativeInjectEvent` only via `RegisterNatives` (no `Java_*` export) → MENU not clickable. Check logcat: `touch hook unavailable`.
-3. **View vs EGL coordinate mismatch** — MotionEvent space can differ from surface pixels on some devices → ESP/menu offset.
-4. **No SEH/signal guard** — bad pointer still hard-crashes the process.
-5. **Murder ESP in lobby** — roles often unset until game start; expect false negatives until `GameState == Started`.
+1. **RegisterNatives ABI break** — C++ registered `nativeEspFill([F)I` while embedded dex still had `([F)V` → overlay would fail to register. Java + dex updated; draw uses fill return count.
+2. **ESP count/fill/label desync** — `nativeEspCount` + separate fill + soft cull dropped rows but labels/index still assumed count. Fill now returns written count and snapshots labels in the same pass.
+3. **Murder ESP without box** — murder highlight now forces box bit even if Boxes toggle is off.
+4. **Screen→overlay scale** — Unity `Screen` size vs View size mismatch corrected with scale factors.
+5. **`CheatState` data race** — toggles are `std::atomic<bool>` (UI thread vs tick thread).
+6. **Unsafe `siglongjmp` crash guard** — removed (UB with C++ destructors / vectors).
+7. **Managed getters on worker thread** — dropped `get_PlayerName` / `get_DefaultOutfit`; read `Outfits` dictionary + `PlayerOutfit` fields instead.
+8. **Activity local ref** — `UnityPlayer.currentActivity` kept as `NewGlobalRef` across async UI post.
+9. **Dead ImGui path in build** — `Android.mk` only links overlay/game/main (Vulkan devices never hit `eglSwapBuffers`).
 
-### Medium / logic notes
-- Murder detection uses `RoleBehaviour.TeamType == Impostor` **or** known murder `RoleTypes` (correct for Phantom/Viper/SS).
-- ESP when only Murder ESP on correctly hides crewmates.
-- `FindLibBase` now prefers `r-xp` mapping.
+## Remaining risks
+
+1. IL2CPP pointer reads from a worker thread can still hard-crash if objects are destroyed mid-frame.
+2. Dictionary entry layout for `Outfits` is assumed (Entry size 24); if names show as `P#` only, layout may need a tweak.
+3. Force-stop between injects; inject once per process.
+4. Roles in lobby may be unset until `GameState == Started`.

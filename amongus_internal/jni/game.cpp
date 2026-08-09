@@ -12,14 +12,18 @@ uintptr_t FindLibBase(const char* name) {
     uintptr_t best = 0;
     while (std::getline(maps, line)) {
         if (line.find(name) == std::string::npos) continue;
-        // Prefer executable mapping; otherwise take lowest address seen
+        // Require path ends with libil2cpp.so (avoid false matches)
+        if (line.find("libil2cpp.so") == std::string::npos) continue;
         uintptr_t start = 0;
         std::stringstream ss(line);
         ss >> std::hex >> start;
         if (!start) continue;
-        bool isExec = line.find("r-xp") != std::string::npos || line.find("r-x") != std::string::npos;
-        if (isExec) return start; // first r-x is load bias for most Android loaders
-        if (!best || start < best) best = start;
+        bool isExec = line.find("r-xp") != std::string::npos;
+        if (isExec) {
+            if (!best || start < best) best = start;
+        } else if (!best) {
+            best = start; // fallback first mapping
+        }
     }
     return best;
 }
@@ -30,21 +34,6 @@ bool Il2CppReady() {
         if (UBase) LOGI("libil2cpp.so @ %p", (void*)UBase);
     }
     return UBase != 0;
-}
-
-static void* Call_get_Data(void* player) {
-    using Fn = void* (*)(void*, const void*);
-    return AsPtr<Fn>(PlayerControl_get_Data)(player, nullptr);
-}
-
-static Il2CppString* Call_get_PlayerName(void* npi) {
-    using Fn = Il2CppString* (*)(void*, const void*);
-    return AsPtr<Fn>(NetworkedPlayerInfo_get_PlayerName)(npi, nullptr);
-}
-
-static void* Call_get_DefaultOutfit(void* npi) {
-    using Fn = void* (*)(void*, const void*);
-    return AsPtr<Fn>(NetworkedPlayerInfo_get_DefaultOutfit)(npi, nullptr);
 }
 
 static void* Call_get_transform(void* component) {
@@ -66,10 +55,35 @@ static void* Call_Camera_main() {
 
 static Vector3 Call_WorldToScreen(void* cam, Vector3 world) {
     Vector3 out{};
-    // WorldToScreenPoint_Injected(this, &pos, eye, &ret, method); eye Mono=2
     using Fn = void (*)(void*, Vector3*, int32_t, Vector3*, const void*);
     AsPtr<Fn>(Camera_WorldToScreenPoint_Injected)(cam, &world, 2, &out, nullptr);
     return out;
+}
+
+// Read Default outfit (PlayerOutfitType=0) from NPI.Outfits without managed calls.
+// Dictionary`2 arm64: buckets@0x10, entries@0x18, count@0x20
+// Entry<int,object>: hash@0, next@4, key@8, value@16 (size 24)
+static void* TryGetDefaultOutfit(void* npi) {
+    void* dict = Read<void*>(npi, NPI_Outfits);
+    if (!dict) return nullptr;
+    auto* entries = *reinterpret_cast<Il2CppArray**>(reinterpret_cast<uintptr_t>(dict) + 0x18);
+    int32_t count = *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(dict) + 0x20);
+    if (!entries || count <= 0 || entries->max_length == 0 || entries->max_length > 64)
+        return nullptr;
+    constexpr size_t kEntrySize = 24;
+    auto* base = reinterpret_cast<uint8_t*>(&entries->vector[0]);
+    const uintptr_t n = entries->max_length;
+    for (uintptr_t i = 0; i < n; ++i) {
+        uint8_t* e = base + i * kEntrySize;
+        int32_t hash = *reinterpret_cast<int32_t*>(e);
+        if (hash < 0) continue;
+        int32_t key = *reinterpret_cast<int32_t*>(e + 8);
+        if (key != 0) continue; // PlayerOutfitType.Default
+        void* val = *reinterpret_cast<void**>(e + 16);
+        // PlayerOutfit is a plain managed object (not UnityEngine.Object)
+        if (val) return val;
+    }
+    return nullptr;
 }
 
 static void* GetLocalPlayer() {
@@ -100,7 +114,6 @@ void Game_TickCollect() {
 
     std::vector<EspPlayer> next;
     int state = GetGameState();
-    // Only collect in lobby/match — TypeInfo statics are unreliable otherwise
     if (state != static_cast<int>(GameStates::Started) &&
         state != static_cast<int>(GameStates::Joined)) {
         std::lock_guard<std::mutex> lk(g_EspMutex);
@@ -122,8 +135,6 @@ void Game_TickCollect() {
         g_EspSnapshot.swap(next);
         return;
     }
-
-    // Bounds check against backing array
     if (list->items->max_length > 0 &&
         static_cast<uintptr_t>(list->size) > list->items->max_length) {
         std::lock_guard<std::mutex> lk(g_EspMutex);
@@ -131,9 +142,7 @@ void Game_TickCollect() {
         return;
     }
 
-    void* cam = nullptr;
-    // Camera/Transform calls can fault if called before Unity systems are up
-    cam = Call_Camera_main();
+    void* cam = Call_Camera_main();
     if (cam && !IsUnityAlive(cam)) cam = nullptr;
 
     Vector3 localPos{};
@@ -146,6 +155,8 @@ void Game_TickCollect() {
         }
     }
 
+    const bool hideDead = g_Cheat.hideDead.load();
+
     for (int i = 0; i < list->size; ++i) {
         void* player = list->items->vector[i];
         if (!player || !IsUnityAlive(player)) continue;
@@ -156,17 +167,16 @@ void Game_TickCollect() {
         ep.playerId = Read<uint8_t>(player, PC_PlayerId);
         ep.isLocal = (player == local);
 
+        // Prefer field only — avoid managed get_Data on worker thread when possible
         void* data = Read<void*>(player, PC_CachedPlayerData);
-        if (!data || !IsUnityAlive(data)) {
-            data = Call_get_Data(player);
-            if (data && !IsUnityAlive(data)) data = nullptr;
-        }
+        if (data && !IsUnityAlive(data)) data = nullptr;
         ep.data = data;
+
         if (data) {
             ep.isDead = Read<bool>(data, NPI_IsDead);
             ep.disconnected = Read<bool>(data, NPI_Disconnected);
             if (ep.disconnected) continue;
-            if (g_Cheat.hideDead && ep.isDead) continue;
+            if (hideDead && ep.isDead) continue;
 
             ep.role = static_cast<RoleTypes>(Read<uint16_t>(data, NPI_RoleType));
             void* roleBeh = Read<void*>(data, NPI_Role);
@@ -179,14 +189,11 @@ void Game_TickCollect() {
                 ep.isMurder = IsMurderRole(ep.role);
             }
 
-            Il2CppString* nameStr = Call_get_PlayerName(data);
-            ep.name = Il2CppStringToUtf8(nameStr);
-            void* outfit = Call_get_DefaultOutfit(data);
+            // Name / color from outfit fields — no managed getters (worker thread unsafe)
+            void* outfit = TryGetDefaultOutfit(data);
             if (outfit) {
                 ep.colorId = Read<int32_t>(outfit, Outfit_ColorId);
-                if (ep.name.empty()) {
-                    ep.name = Il2CppStringToUtf8(Read<Il2CppString*>(outfit, Outfit_PlayerName));
-                }
+                ep.name = Il2CppStringToUtf8(Read<Il2CppString*>(outfit, Outfit_PlayerName));
             }
             if (ep.name.empty()) {
                 char tmp[32];
@@ -194,7 +201,6 @@ void Game_TickCollect() {
                 ep.name = tmp;
             }
         } else {
-            // No NetworkedPlayerInfo yet (late join) — still draw if we have transform
             char tmp[32];
             snprintf(tmp, sizeof(tmp), "P%u", ep.playerId);
             ep.name = tmp;
@@ -207,7 +213,7 @@ void Game_TickCollect() {
 
         if (cam) {
             Vector3 sp = Call_WorldToScreen(cam, ep.world);
-            // Unity: z>0 in front of camera; screen Y is bottom-up
+            // Orthographic: z is depth; behind camera typically z < 0
             ep.onScreen = (sp.z > 0.f);
             ep.screen = {sp.x, sp.y};
         }

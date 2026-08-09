@@ -29,6 +29,7 @@ constexpr uintptr_t PC_notRealPlayer      = 0x111;
 // NetworkedPlayerInfo instance
 constexpr uintptr_t NPI_PlayerId          = 0x35;
 constexpr uintptr_t NPI_RoleType          = 0x50; // RoleTypes ushort
+constexpr uintptr_t NPI_Outfits           = 0x58; // Dictionary<PlayerOutfitType, PlayerOutfit>*
 constexpr uintptr_t NPI_Disconnected      = 0x64;
 constexpr uintptr_t NPI_Role              = 0x68; // RoleBehaviour*
 constexpr uintptr_t NPI_IsDead            = 0x78;
