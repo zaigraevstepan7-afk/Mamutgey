@@ -242,9 +242,18 @@ static jboolean J_nativeGetBox(JNIEnv*, jclass) { return g_Cheat.espBox.load(); 
 static jboolean J_nativeGetLine(JNIEnv*, jclass) { return g_Cheat.espLine.load(); }
 static jboolean J_nativeGetName(JNIEnv*, jclass) { return g_Cheat.espName.load(); }
 
-static void J_nativeSetNoclip(JNIEnv*, jclass, jboolean v) { g_Cheat.noclip.store(v); }
+static void J_nativeSetNoclip(JNIEnv*, jclass, jboolean v) {
+    g_Cheat.noclip.store(v);
+    LOGI("noclip => %d", v ? 1 : 0);
+}
 static jboolean J_nativeGetNoclip(JNIEnv*, jclass) { return g_Cheat.noclip.load(); }
-static void J_nativeBecomeMurder(JNIEnv*, jclass) { g_Cheat.becomeMurderPending.store(true); }
+static void J_nativeBecomeMurder(JNIEnv*, jclass) {
+    g_Cheat.becomeMurderPending.store(true);
+    LOGI("becomeMurder pending");
+}
+static jstring J_nativeGetStatus(JNIEnv* env, jclass) {
+    return env->NewStringUTF(Game_Status());
+}
 
 static void J_nativeSetViewSize(JNIEnv*, jclass, jint w, jint h) {
     if (w > 0) g_ViewW = w;
@@ -285,6 +294,7 @@ static JNINativeMethod g_Methods[] = {
     {const_cast<char*>("nativeSetNoclip"), const_cast<char*>("(Z)V"), (void*)J_nativeSetNoclip},
     {const_cast<char*>("nativeGetNoclip"), const_cast<char*>("()Z"), (void*)J_nativeGetNoclip},
     {const_cast<char*>("nativeBecomeMurder"), const_cast<char*>("()V"), (void*)J_nativeBecomeMurder},
+    {const_cast<char*>("nativeGetStatus"), const_cast<char*>("()Ljava/lang/String;"), (void*)J_nativeGetStatus},
     {const_cast<char*>("nativeSetViewSize"), const_cast<char*>("(II)V"), (void*)J_nativeSetViewSize},
     {const_cast<char*>("nativeLog"), const_cast<char*>("(Ljava/lang/String;)V"), (void*)J_nativeLog},
     {const_cast<char*>("nativePlayerCount"), const_cast<char*>("()I"), (void*)J_nativePlayerCount},
@@ -341,7 +351,7 @@ bool Overlay_Start(JavaVM* vm) {
 
     if (g_Alive.load()) return true;
 
-    OLOGI("BUILD=20260809j noclip-murder");
+    OLOGI("BUILD=20260809k memfix");
 
     jobject appCl = GetAppClassLoader(env);
     if (!appCl) return false;

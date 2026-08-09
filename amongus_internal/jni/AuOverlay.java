@@ -77,6 +77,7 @@ public class AuOverlay {
     public static native void nativeSetNoclip(boolean v);
     public static native boolean nativeGetNoclip();
     public static native void nativeBecomeMurder();
+    public static native String nativeGetStatus();
     public static native void nativeSetViewSize(int w, int h);
     public static native void nativeLog(String msg);
     public static native int nativePlayerCount();
@@ -150,7 +151,7 @@ public class AuOverlay {
 
             // Compact floating panel
             int panelW = dp(250);
-            int panelH = dp(210);
+            int panelH = dp(230);
             sheet = new MenuSheet(ctx);
             sheetLp = params(panelW, panelH, true);
             sheetLp.gravity = Gravity.TOP | Gravity.START;
@@ -452,7 +453,13 @@ public class AuOverlay {
             c.drawText("AMONG US", bx, dpf(32), brand);
             float brandW = brand.measureText("AMONG US ");
             c.drawText("INTERNAL", bx + brandW, dpf(32), brandSub);
-            c.drawText("noclip · murderer", bx, dpf(46), meta);
+            String st = "";
+            try {
+                String s = nativeGetStatus();
+                if (s != null) st = s;
+            } catch (Throwable ignored) {}
+            if (st.length() > 28) st = st.substring(0, 28);
+            c.drawText(st.length() > 0 ? st : "noclip · murderer", bx, dpf(46), meta);
 
             float y = rowStart();
             float rh = rowH();

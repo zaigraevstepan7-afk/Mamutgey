@@ -46,3 +46,4 @@ void Game_TickCollect();
 void Game_ApplyCheats();
 uintptr_t FindLibBase(const char* name);
 void* Game_GetLocalPlayer();
+const char* Game_Status();

@@ -5,19 +5,30 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <atomic>
+#include <cstring>
 
 using namespace Offsets;
 
 static std::atomic<bool> g_Il2CppThreadReady{false};
 static std::atomic<int> g_WarmupTicks{0};
+static char g_Status[192] = "init";
+
+static void SetStatus(const char* s) {
+    if (!s) return;
+    strncpy(g_Status, s, sizeof(g_Status) - 1);
+    g_Status[sizeof(g_Status) - 1] = 0;
+    LOGI("status: %s", g_Status);
+}
+
+const char* Game_Status() { return g_Status; }
 
 uintptr_t FindLibBase(const char* name) {
     std::ifstream maps("/proc/self/maps");
     std::string line;
     uintptr_t best = 0;
     while (std::getline(maps, line)) {
-        if (line.find(name) == std::string::npos) continue;
         if (line.find("libil2cpp.so") == std::string::npos) continue;
+        if (name && line.find(name) == std::string::npos) continue;
         uintptr_t start = 0;
         std::stringstream ss(line);
         ss >> std::hex >> start;
@@ -32,6 +43,17 @@ uintptr_t FindLibBase(const char* name) {
     return best;
 }
 
+static std::string FindLibPath() {
+    std::ifstream maps("/proc/self/maps");
+    std::string line;
+    while (std::getline(maps, line)) {
+        if (line.find("libil2cpp.so") == std::string::npos) continue;
+        auto p = line.find('/');
+        if (p != std::string::npos) return line.substr(p);
+    }
+    return {};
+}
+
 bool Il2CppReady() {
     if (!UBase) {
         UBase = FindLibBase("libil2cpp.so");
@@ -40,32 +62,118 @@ bool Il2CppReady() {
     return UBase != 0;
 }
 
-// Must call once on the tick thread before any managed IL2CPP invokes.
 bool Il2CppAttachThread() {
     if (g_Il2CppThreadReady.load()) return true;
-    if (!Il2CppReady()) return false;
-
-    void* mod = dlopen("libil2cpp.so", RTLD_NOW);
-    if (!mod) mod = dlopen("libil2cpp.so", RTLD_NOLOAD);
-    if (!mod) {
-        LOGE("dlopen libil2cpp failed");
+    if (!Il2CppReady()) {
+        SetStatus("no il2cpp base");
         return false;
     }
 
     using DomainFn = void* (*)();
     using AttachFn = void* (*)(void*);
-    auto domain_get = reinterpret_cast<DomainFn>(dlsym(mod, "il2cpp_domain_get"));
-    auto thread_attach = reinterpret_cast<AttachFn>(dlsym(mod, "il2cpp_thread_attach"));
+
+    DomainFn domain_get = reinterpret_cast<DomainFn>(dlsym(RTLD_DEFAULT, "il2cpp_domain_get"));
+    AttachFn thread_attach = reinterpret_cast<AttachFn>(dlsym(RTLD_DEFAULT, "il2cpp_thread_attach"));
+
     if (!domain_get || !thread_attach) {
-        LOGE("il2cpp_domain_get/thread_attach missing");
+        void* mod = nullptr;
+        std::string path = FindLibPath();
+        if (!path.empty()) {
+            // strip trailing spaces
+            while (!path.empty() && (path.back() == ' ' || path.back() == '\r')) path.pop_back();
+            mod = dlopen(path.c_str(), RTLD_NOW);
+        }
+        if (!mod) mod = dlopen("libil2cpp.so", RTLD_NOW | RTLD_NOLOAD);
+        if (!mod) mod = dlopen("libil2cpp.so", RTLD_NOW);
+        if (!mod) {
+            SetStatus("dlopen il2cpp fail");
+            return false;
+        }
+        domain_get = reinterpret_cast<DomainFn>(dlsym(mod, "il2cpp_domain_get"));
+        thread_attach = reinterpret_cast<AttachFn>(dlsym(mod, "il2cpp_thread_attach"));
+    }
+
+    if (!domain_get || !thread_attach) {
+        SetStatus("il2cpp symbols missing");
         return false;
     }
     void* domain = domain_get();
-    if (!domain) return false;
+    if (!domain) {
+        SetStatus("il2cpp domain null");
+        return false;
+    }
     thread_attach(domain);
     g_Il2CppThreadReady.store(true);
-    LOGI("il2cpp_thread_attach OK");
+    SetStatus("il2cpp attached");
     return true;
+}
+
+// Validate Il2CppClass* by reading name pointer at +0x10 (Il2CppClass_1.name)
+static bool ClassNameIs(void* klass, const char* expect) {
+    if (!klass || !expect) return false;
+    const char* name = *reinterpret_cast<const char**>(reinterpret_cast<uintptr_t>(klass) + 0x10);
+    if (!name) return false;
+    // quick sanity: first char printable
+    if (name[0] < 0x20 || name[0] > 0x7e) return false;
+    return std::strcmp(name, expect) == 0;
+}
+
+static void* GetStaticFieldsVerified(void* klass) {
+    if (!klass) return nullptr;
+    // Primary: Il2CppClass.static_fields @ 0xB8 (confirmed from this dump's il2cpp.h)
+    void* sf = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(klass) + 0xB8);
+    return sf;
+}
+
+static void* GetPlayerControlClass() {
+    void* ti = GetTypeInfo(PlayerControl_TypeInfo);
+    if (!ti) {
+        SetStatus("PC TypeInfo null");
+        return nullptr;
+    }
+    if (!ClassNameIs(ti, "PlayerControl")) {
+        // Still try — name layout might differ, but log it
+        const char* name = *reinterpret_cast<const char**>(reinterpret_cast<uintptr_t>(ti) + 0x10);
+        LOGI("PC klass name@+0x10 = %s (expected PlayerControl)", name ? name : "(null)");
+    }
+    return ti;
+}
+
+static void* GetLocalPlayer() {
+    void* ti = GetPlayerControlClass();
+    if (!ti) return nullptr;
+    void* sf = GetStaticFieldsVerified(ti);
+    if (!sf) {
+        SetStatus("PC static_fields null");
+        return nullptr;
+    }
+    void* local = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(sf) + PC_LocalPlayer);
+    return local;
+}
+
+void* Game_GetLocalPlayer() { return GetLocalPlayer(); }
+
+static void* GetAllPlayersList() {
+    void* ti = GetPlayerControlClass();
+    if (!ti) return nullptr;
+    void* sf = GetStaticFieldsVerified(ti);
+    if (!sf) return nullptr;
+    return *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(sf) + PC_AllPlayerControls);
+}
+
+static int GetGameState() {
+    void* ti = GetTypeInfo(AmongUsClient_TypeInfo);
+    if (!ti) return -1;
+    void* sf = GetStaticFieldsVerified(ti);
+    if (!sf) return -1;
+    // AmongUsClient inherits InnerNetClient; Instance is typically static on AmongUsClient
+    // Dump: AmongUsClient has static Instance via DestroyableSingleton pattern OR
+    // InnerNetClient fields on instance. ScriptMetadata AmongUsClient_TypeInfo statics:
+    // Check il2cpp — AmongUsClient_StaticFields
+    void* client = *reinterpret_cast<void**>(sf);
+    if (!client) return -1;
+    if (!IsUnityAlive(client)) return -1;
+    return Read<int32_t>(client, AUC_GameState);
 }
 
 static void* Call_get_transform(void* component) {
@@ -92,85 +200,123 @@ static Vector3 Call_WorldToScreen(void* cam, Vector3 world) {
     return out;
 }
 
-static void* GetLocalPlayer() {
-    void* ti = GetTypeInfo(PlayerControl_TypeInfo);
-    if (!ti) return nullptr;
-    void* sf = GetStaticFields(ti);
-    if (!sf) return nullptr;
-    return *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(sf) + PC_LocalPlayer);
-}
-
-void* Game_GetLocalPlayer() { return GetLocalPlayer(); }
-
 static void SetBehaviourEnabled(void* behaviour, bool enabled) {
-    if (!behaviour || !IsUnityAlive(behaviour)) return;
+    if (!behaviour) return;
+    // Collider2D is a UnityEngine.Object — check native ptr
+    if (!IsUnityAlive(behaviour)) return;
     using Fn = void (*)(void*, bool, const void*);
     AsPtr<Fn>(Behaviour_set_enabled)(behaviour, enabled, nullptr);
 }
 
-static void* GetRoleManager() {
-    void* ti = GetTypeInfo(RoleManager_TypeInfo);
-    if (!ti) return nullptr;
-    void* sf = GetStaticFields(ti);
-    if (!sf) return nullptr;
-    // DestroyableSingleton<T>._instance @ static 0x0
-    return *reinterpret_cast<void**>(sf);
+static bool GetBehaviourEnabled(void* behaviour) {
+    if (!behaviour || !IsUnityAlive(behaviour)) return false;
+    using Fn = bool (*)(void*, const void*);
+    return AsPtr<Fn>(0x444858C)(behaviour, nullptr); // Behaviour.get_enabled
+}
+
+// MethodInfo* slot for DestroyableSingleton<RoleManager>.get_Instance
+constexpr uintptr_t Method_DestroyableSingleton_RoleManager_get_Instance = 0x4AB2F98;
+constexpr uintptr_t DestroyableSingleton_object_get_Instance = 0x2E6C1A8;
+constexpr uintptr_t PlayerControl_SetKillTimer = 0x21B5500;
+
+static void* GetRoleManagerInstance() {
+    // Correct path: generic DestroyableSingleton<RoleManager>.get_Instance(MethodInfo*)
+    void** slot = reinterpret_cast<void**>(UBase + Method_DestroyableSingleton_RoleManager_get_Instance);
+    void* methodInfo = *slot;
+    if (!methodInfo) methodInfo = reinterpret_cast<void*>(slot); // some builds store MI inline
+    using Fn = void* (*)(const void*);
+    void* rm = AsPtr<Fn>(DestroyableSingleton_object_get_Instance)(methodInfo);
+    if (!rm || !IsUnityAlive(rm)) {
+        SetStatus("RM Instance null");
+        return nullptr;
+    }
+    return rm;
 }
 
 static void DoBecomeMurderer(void* local) {
-    if (!local || !IsUnityAlive(local)) return;
-    const auto role = static_cast<uint16_t>(RoleTypes::Impostor);
+    if (!local || !IsUnityAlive(local)) {
+        SetStatus("murder: no local");
+        return;
+    }
 
-    // Prefer networked RPC (works as host; may soft-apply as client)
+    const uint16_t role = static_cast<uint16_t>(RoleTypes::Impostor);
+
+    // 1) Networked RPC
     using RpcFn = void (*)(void*, uint16_t, bool, const void*);
     AsPtr<RpcFn>(PlayerControl_RpcSetRole)(local, role, true, nullptr);
 
-    // Also try RoleManager.SetRole for local assignment
-    void* rm = GetRoleManager();
-    if (rm && IsUnityAlive(rm)) {
+    // 2) RoleManager.SetRole (needs real Instance)
+    void* rm = GetRoleManagerInstance();
+    if (rm) {
         using SetFn = void (*)(void*, void*, uint16_t, const void*);
         AsPtr<SetFn>(RoleManager_SetRole)(rm, local, role, nullptr);
     }
 
-    // Reset kill cooldown locally
-    *reinterpret_cast<float*>(reinterpret_cast<uintptr_t>(local) + PC_killTimer) = 0.f;
+    // 3) Kill timer via proper setter
+    using KillFn = void (*)(void*, float, const void*);
+    AsPtr<KillFn>(PlayerControl_SetKillTimer)(local, 0.f, nullptr);
 
-    // Force CanUseKillButton on current role behaviour if present
+    // 4) Direct memory writes as fallback (verified dump offsets)
     void* data = Read<void*>(local, PC_CachedPlayerData);
-    if (data && IsUnityAlive(data)) {
+    if (data) {
+        *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(data) + NPI_RoleType) = role;
         void* roleBeh = Read<void*>(data, NPI_Role);
-        if (roleBeh && IsUnityAlive(roleBeh)) {
+        if (roleBeh) {
+            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(roleBeh) + RB_Role) = role;
+            *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(roleBeh) + RB_TeamType) = 1; // Impostor
             *reinterpret_cast<bool*>(reinterpret_cast<uintptr_t>(roleBeh) + RB_CanUseKillButton) = true;
-            *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(roleBeh) + RB_TeamType) = 1;
-            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(roleBeh) + RB_Role) =
-                static_cast<uint16_t>(RoleTypes::Impostor);
         }
-        *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(data) + NPI_RoleType) =
-            static_cast<uint16_t>(RoleTypes::Impostor);
     }
-    LOGI("become murderer applied");
+
+    SetStatus("murder applied");
 }
 
 static void ApplyNoclip(void* local, bool on) {
     if (!local || !IsUnityAlive(local)) return;
 
-    // Disable player wall collider — classic Among Us noclip
+    // Primary: PlayerControl.Collider (dump 0xC8) — wall collision
     void* col = Read<void*>(local, PC_Collider);
-    SetBehaviourEnabled(col, !on);
+    if (col) {
+        SetBehaviourEnabled(col, !on);
+        bool en = GetBehaviourEnabled(col);
+        // If managed call didn't stick, we still report
+        if (on && en) {
+            // retry once
+            SetBehaviourEnabled(col, false);
+        }
+    }
 
-    // Keep rigidbody simulated so movement still works; only collider off
-    // Optional: also toggle physics body collider path via MyPhysics.body — leave simulated on
+    // Also toggle physics body simulated? NO — that freezes movement.
+    // Instead ensure moveable flag is true when noclip on
+    if (on) {
+        *reinterpret_cast<bool*>(reinterpret_cast<uintptr_t>(local) + 0x4C) = true; // moveable
+    }
+
+    static int logThrottle = 0;
+    if ((++logThrottle % 60) == 0) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "noclip=%d col=%p en=%d",
+                 on ? 1 : 0, col, col ? (GetBehaviourEnabled(col) ? 1 : 0) : -1);
+        SetStatus(buf);
+    }
 }
 
 void Game_ApplyCheats() {
-    if (!Il2CppReady() || !Il2CppAttachThread()) return;
-    int warm = g_WarmupTicks.load();
-    if (warm < 180) return;
+    if (!Il2CppReady()) return;
+    if (!Il2CppAttachThread()) return;
 
     void* local = GetLocalPlayer();
-    if (!local || !IsUnityAlive(local)) return;
+    if (!local) {
+        static int t = 0;
+        if ((++t % 90) == 0) SetStatus("wait LocalPlayer");
+        return;
+    }
+    if (!IsUnityAlive(local)) {
+        SetStatus("LocalPlayer dead ptr");
+        return;
+    }
 
-    // Noclip every tick so game scripts can't re-enable collider
+    // Always apply noclip state (re-assert each tick)
     ApplyNoclip(local, g_Cheat.noclip.load());
 
     if (g_Cheat.becomeMurderPending.exchange(false)) {
@@ -178,31 +324,16 @@ void Game_ApplyCheats() {
     }
 }
 
-static void* GetAllPlayersList() {
-    void* ti = GetTypeInfo(PlayerControl_TypeInfo);
-    if (!ti) return nullptr;
-    void* sf = GetStaticFields(ti);
-    if (!sf) return nullptr;
-    return *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(sf) + PC_AllPlayerControls);
-}
-
-static int GetGameState() {
-    void* ti = GetTypeInfo(AmongUsClient_TypeInfo);
-    if (!ti) return -1;
-    void* sf = GetStaticFields(ti);
-    if (!sf) return -1;
-    void* client = *reinterpret_cast<void**>(sf);
-    if (!client || !IsUnityAlive(client)) return -1;
-    return Read<int32_t>(client, AUC_GameState);
-}
-
 void Game_TickCollect() {
     if (!Il2CppReady()) return;
     if (!Il2CppAttachThread()) return;
 
-    // Warm up a few seconds after attach before touching gameplay objects.
-    int warm = g_WarmupTicks.fetch_add(1);
-    if (warm < 180) { // ~3s at 16ms
+    g_WarmupTicks.fetch_add(1);
+
+    // Skip heavy ESP work unless enabled
+    if (!g_Cheat.espEnabled.load() && !g_Cheat.murderEspEnabled.load()) {
+        std::lock_guard<std::mutex> lk(g_EspMutex);
+        g_EspSnapshot.clear();
         return;
     }
 
@@ -237,7 +368,6 @@ void Game_TickCollect() {
     }
 
     void* cam = nullptr;
-    // Camera only once match is running — safer than lobby.
     if (state == static_cast<int>(GameStates::Started)) {
         cam = Call_Camera_main();
         if (cam && !IsUnityAlive(cam)) cam = nullptr;
@@ -287,12 +417,9 @@ void Game_TickCollect() {
             }
         }
 
-        // Safe fallback name — no outfit dictionary walks (crashy on worker thread)
-        {
-            char tmp[32];
-            snprintf(tmp, sizeof(tmp), "P%u", ep.playerId);
-            ep.name = tmp;
-        }
+        char tmp[32];
+        snprintf(tmp, sizeof(tmp), "P%u", ep.playerId);
+        ep.name = tmp;
 
         void* tr = Call_get_transform(player);
         if (!tr || !IsUnityAlive(tr)) continue;
