@@ -6,6 +6,7 @@ LOCAL_SRC_FILES  := \
     main.cpp \
     game.cpp \
     ui.cpp \
+    overlay.cpp \
     imgui/imgui.cpp \
     imgui/imgui_draw.cpp \
     imgui/imgui_tables.cpp \
