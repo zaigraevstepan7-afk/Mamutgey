@@ -6,8 +6,8 @@ Inject with **AndKittyInjector** (Kitty). Offsets are synced from the dump in `a
 ## Features
 - **Player ESP** — box, snapline, name, role, distance
 - **Murder ESP** — impostor team highlight (Impostor / Shapeshifter / Phantom / Viper / ImpGhost)
-- **Floating MENU button** — tap to open/close ImGui panel
-- Touch forwarded through `UnityPlayer.nativeInjectEvent` hook
+- **White bottom strip** — tap the glowing white bar at the bottom to open/close the menu sheet
+- Android View overlay (works on Vulkan + GLES)
 
 ## Build (NDK)
 ```bash
