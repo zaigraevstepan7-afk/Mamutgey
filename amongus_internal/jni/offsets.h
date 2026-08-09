@@ -55,10 +55,10 @@ constexpr uintptr_t RoleBehaviour_get_IsImpostor        = 0x21F6F00;
 constexpr uintptr_t RoleManager_IsImpostorRole          = 0x21FEB14;
 constexpr uintptr_t Camera_get_main                     = 0x4411BAC;
 constexpr uintptr_t Camera_WorldToScreenPoint           = 0x44112F8;
+constexpr uintptr_t Camera_WorldToScreenPoint_Injected  = 0x4411038; // (pos, eye, out)
 constexpr uintptr_t Component_get_transform             = 0x44490BC;
 constexpr uintptr_t Transform_get_position              = 0x44565A0;
-constexpr uintptr_t Transform_get_position_Injected     = 0x44565A0 + 0; // prefer Injected if available
-constexpr uintptr_t Object_get_Name                     = 0; // unused
+constexpr uintptr_t Transform_get_position_Injected     = 0x44565FC;
 
 enum class RoleTypes : uint16_t {
     Crewmate = 0,

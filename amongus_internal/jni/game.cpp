@@ -9,15 +9,19 @@ using namespace Offsets;
 uintptr_t FindLibBase(const char* name) {
     std::ifstream maps("/proc/self/maps");
     std::string line;
+    uintptr_t best = 0;
     while (std::getline(maps, line)) {
         if (line.find(name) == std::string::npos) continue;
-        // first mapping for the lib
+        // Prefer executable mapping; otherwise take lowest address seen
         uintptr_t start = 0;
         std::stringstream ss(line);
         ss >> std::hex >> start;
-        return start;
+        if (!start) continue;
+        bool isExec = line.find("r-xp") != std::string::npos || line.find("r-x") != std::string::npos;
+        if (isExec) return start; // first r-x is load bias for most Android loaders
+        if (!best || start < best) best = start;
     }
-    return 0;
+    return best;
 }
 
 bool Il2CppReady() {
@@ -51,7 +55,7 @@ static void* Call_get_transform(void* component) {
 static Vector3 Call_get_position(void* transform) {
     Vector3 out{};
     using Fn = void (*)(void*, Vector3*, const void*);
-    AsPtr<Fn>(0x44565FC)(transform, &out, nullptr); // get_position_Injected
+    AsPtr<Fn>(Transform_get_position_Injected)(transform, &out, nullptr);
     return out;
 }
 
@@ -62,9 +66,9 @@ static void* Call_Camera_main() {
 
 static Vector3 Call_WorldToScreen(void* cam, Vector3 world) {
     Vector3 out{};
-    // WorldToScreenPoint_Injected(this, &pos, eye, &ret, method) eye: Mono=2
+    // WorldToScreenPoint_Injected(this, &pos, eye, &ret, method); eye Mono=2
     using Fn = void (*)(void*, Vector3*, int32_t, Vector3*, const void*);
-    AsPtr<Fn>(0x4411038)(cam, &world, 2, &out, nullptr);
+    AsPtr<Fn>(Camera_WorldToScreenPoint_Injected)(cam, &world, 2, &out, nullptr);
     return out;
 }
 
@@ -96,7 +100,7 @@ void Game_TickCollect() {
 
     std::vector<EspPlayer> next;
     int state = GetGameState();
-    // Joined lobby still useful for testing names; Started = in round
+    // Only collect in lobby/match — TypeInfo statics are unreliable otherwise
     if (state != static_cast<int>(GameStates::Started) &&
         state != static_cast<int>(GameStates::Joined)) {
         std::lock_guard<std::mutex> lk(g_EspMutex);
@@ -119,12 +123,24 @@ void Game_TickCollect() {
         return;
     }
 
-    void* cam = Call_Camera_main();
+    // Bounds check against backing array
+    if (list->items->max_length > 0 &&
+        static_cast<uintptr_t>(list->size) > list->items->max_length) {
+        std::lock_guard<std::mutex> lk(g_EspMutex);
+        g_EspSnapshot.swap(next);
+        return;
+    }
+
+    void* cam = nullptr;
+    // Camera/Transform calls can fault if called before Unity systems are up
+    cam = Call_Camera_main();
+    if (cam && !IsUnityAlive(cam)) cam = nullptr;
+
     Vector3 localPos{};
     bool haveLocalPos = false;
     if (local && IsUnityAlive(local)) {
         void* tr = Call_get_transform(local);
-        if (tr) {
+        if (tr && IsUnityAlive(tr)) {
             localPos = Call_get_position(tr);
             haveLocalPos = true;
         }
@@ -141,7 +157,10 @@ void Game_TickCollect() {
         ep.isLocal = (player == local);
 
         void* data = Read<void*>(player, PC_CachedPlayerData);
-        if (!data) data = Call_get_Data(player);
+        if (!data || !IsUnityAlive(data)) {
+            data = Call_get_Data(player);
+            if (data && !IsUnityAlive(data)) data = nullptr;
+        }
         ep.data = data;
         if (data) {
             ep.isDead = Read<bool>(data, NPI_IsDead);
@@ -151,7 +170,7 @@ void Game_TickCollect() {
 
             ep.role = static_cast<RoleTypes>(Read<uint16_t>(data, NPI_RoleType));
             void* roleBeh = Read<void*>(data, NPI_Role);
-            if (roleBeh) {
+            if (roleBeh && IsUnityAlive(roleBeh)) {
                 int team = Read<int32_t>(roleBeh, RB_TeamType);
                 auto roleFromBeh = static_cast<RoleTypes>(Read<uint16_t>(roleBeh, RB_Role));
                 ep.role = roleFromBeh;
@@ -174,15 +193,21 @@ void Game_TickCollect() {
                 snprintf(tmp, sizeof(tmp), "P%u", ep.playerId);
                 ep.name = tmp;
             }
+        } else {
+            // No NetworkedPlayerInfo yet (late join) — still draw if we have transform
+            char tmp[32];
+            snprintf(tmp, sizeof(tmp), "P%u", ep.playerId);
+            ep.name = tmp;
         }
 
         void* tr = Call_get_transform(player);
-        if (!tr) continue;
+        if (!tr || !IsUnityAlive(tr)) continue;
         ep.world = Call_get_position(tr);
         if (haveLocalPos) ep.distance = Dist2D(localPos, ep.world);
 
-        if (cam && IsUnityAlive(cam)) {
+        if (cam) {
             Vector3 sp = Call_WorldToScreen(cam, ep.world);
+            // Unity: z>0 in front of camera; screen Y is bottom-up
             ep.onScreen = (sp.z > 0.f);
             ep.screen = {sp.x, sp.y};
         }

@@ -112,21 +112,26 @@ void Esp_Draw(float displayW, float displayH) {
         if (g_Cheat.espName || g_Cheat.espRole || g_Cheat.espDistance) {
             char buf[192];
             buf[0] = 0;
+            auto append = [&](const char* piece) {
+                size_t used = strlen(buf);
+                if (used + 1 >= sizeof(buf)) return;
+                strncat(buf, piece, sizeof(buf) - used - 1);
+            };
             if (g_Cheat.espName) {
                 snprintf(buf, sizeof(buf), "%s", p.name.empty() ? "Player" : p.name.c_str());
             }
             if (g_Cheat.espRole) {
                 char tmp[96];
                 snprintf(tmp, sizeof(tmp), "%s[%s]", buf[0] ? " " : "", Offsets::RoleName(p.role));
-                strncat(buf, tmp, sizeof(buf) - strlen(buf) - 1);
+                append(tmp);
             }
             if (g_Cheat.espDistance) {
                 char tmp[32];
                 snprintf(tmp, sizeof(tmp), " %.1fm", p.distance);
-                strncat(buf, tmp, sizeof(buf) - strlen(buf) - 1);
+                append(tmp);
             }
             if (showMurder && p.isMurder) {
-                strncat(buf, " *MURDER*", sizeof(buf) - strlen(buf) - 1);
+                append(" *MURDER*");
             }
             ImVec2 ts = ImGui::CalcTextSize(buf);
             ImVec2 tp(sx - ts.x * 0.5f, mn.y - ts.y - 2.0f);
@@ -138,8 +143,8 @@ void Esp_Draw(float displayW, float displayH) {
 }
 
 void Menu_Draw(float displayW, float displayH) {
-    ImGuiIO& io = ImGui::GetIO();
-    io.DisplaySize = ImVec2(displayW, displayH);
+    (void)displayW;
+    // DisplaySize / DeltaTime must already be set before NewFrame() in main.cpp
 
     // Floating open / close button (always visible)
     ImGui::SetNextWindowPos(ImVec2(24.0f, displayH * 0.35f), ImGuiCond_FirstUseEver);
@@ -153,7 +158,8 @@ void Menu_Draw(float displayW, float displayH) {
 
     ImGui::Begin("##fab", nullptr,
                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse);
+                     ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse |
+                     ImGuiWindowFlags_NoSavedSettings);
     if (ImGui::Button(g_Cheat.menuOpen ? "CLOSE" : "MENU", ImVec2(70, 70))) {
         g_Cheat.menuOpen = !g_Cheat.menuOpen;
     }
