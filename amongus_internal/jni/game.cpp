@@ -141,9 +141,9 @@ static bool ClassNameIs(void* klass, const char* expect) {
 }
 
 static void* GetStaticFieldsVerified(void* klass) {
-    if (!klass) return nullptr;
-    // Primary: Il2CppClass.static_fields @ 0xB8 (confirmed from this dump's il2cpp.h)
+    if (!klass || !IsReadablePtr(klass, 0xC0)) return nullptr;
     void* sf = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(klass) + 0xB8);
+    if (sf && !IsReadablePtr(sf, 0x10)) return nullptr;
     return sf;
 }
 
@@ -153,10 +153,9 @@ static void* GetPlayerControlClass() {
         SetStatus("PC TypeInfo null");
         return nullptr;
     }
-    if (!ClassNameIs(ti, "PlayerControl")) {
-        // Still try — name layout might differ, but log it
-        const char* name = *reinterpret_cast<const char**>(reinterpret_cast<uintptr_t>(ti) + 0x10);
-        LOGI("PC klass name@+0x10 = %s (expected PlayerControl)", name ? name : "(null)");
+    if (!IsReadablePtr(ti, 0xC0)) {
+        SetStatus("PC TypeInfo unreadable");
+        return nullptr;
     }
     return ti;
 }
@@ -170,6 +169,7 @@ static void* GetLocalPlayer() {
         return nullptr;
     }
     void* local = *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(sf) + PC_LocalPlayer);
+    if (local && !IsReadablePtr(local, 0x20)) return nullptr;
     return local;
 }
 
@@ -224,14 +224,14 @@ static Vector3 Call_WorldToScreen(void* cam, Vector3 world) {
 
 static void SetBehaviourEnabled(void* behaviour, bool enabled) {
     if (!behaviour) return;
-    // Collider2D is a UnityEngine.Object — check native ptr
+    if (!IsReadablePtr(behaviour, 0x18)) return;
     if (!IsUnityAlive(behaviour)) return;
     using Fn = void (*)(void*, bool, const void*);
     AsPtr<Fn>(Behaviour_set_enabled)(behaviour, enabled, nullptr);
 }
 
 static bool GetBehaviourEnabled(void* behaviour) {
-    if (!behaviour || !IsUnityAlive(behaviour)) return false;
+    if (!behaviour || !IsReadablePtr(behaviour, 0x18) || !IsUnityAlive(behaviour)) return false;
     using Fn = bool (*)(void*, const void*);
     return AsPtr<Fn>(0x444858C)(behaviour, nullptr); // Behaviour.get_enabled
 }
@@ -244,8 +244,10 @@ constexpr uintptr_t PlayerControl_SetKillTimer = 0x21B5500;
 static void* GetRoleManagerInstance() {
     // Correct path: generic DestroyableSingleton<RoleManager>.get_Instance(MethodInfo*)
     void** slot = reinterpret_cast<void**>(UBase + Method_DestroyableSingleton_RoleManager_get_Instance);
+    if (!IsReadablePtr(slot, sizeof(void*))) return nullptr;
     void* methodInfo = *slot;
-    if (!methodInfo) methodInfo = reinterpret_cast<void*>(slot); // some builds store MI inline
+    if (!methodInfo) return nullptr;
+    if (!IsReadablePtr(methodInfo, 0x10)) return nullptr;
     using Fn = void* (*)(const void*);
     void* rm = AsPtr<Fn>(DestroyableSingleton_object_get_Instance)(methodInfo);
     if (!rm || !IsUnityAlive(rm)) {
@@ -278,16 +280,15 @@ static void DoBecomeMurderer(void* local) {
 
     void* data = Read<void*>(local, PC_CachedPlayerData);
     bool wrote = false;
-    if (data) {
+    if (data && IsReadablePtr(data, 0x80)) {
         *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(data) + NPI_RoleType) = role;
         void* roleBeh = Read<void*>(data, NPI_Role);
-        if (roleBeh) {
+        if (roleBeh && IsReadablePtr(roleBeh, 0x70)) {
             *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(roleBeh) + RB_Role) = role;
             *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(roleBeh) + RB_TeamType) = 1;
             *reinterpret_cast<bool*>(reinterpret_cast<uintptr_t>(roleBeh) + RB_CanUseKillButton) = true;
             wrote = true;
         }
-        // Verify write
         auto check = *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(data) + NPI_RoleType);
         if (check == role) wrote = true;
     }
@@ -301,38 +302,61 @@ static void DoBecomeMurderer(void* local) {
     }
 }
 
+// Only touch Unity Behaviour when state changes — calling set_enabled every tick crashes.
+static std::atomic<int> g_NoclipApplied{-1}; // -1 unknown, 0 off applied, 1 on applied
+
 static void ApplyNoclip(void* local, bool on) {
     if (!local || !IsUnityAlive(local)) {
-        SetNoclipLine("Noclip: нет игрока", false);
+        SetNoclipLine(on ? "Noclip: нет игрока" : "Noclip: выкл", false);
+        g_NoclipApplied.store(-1);
         return;
     }
 
-    if (!on) {
-        void* col = Read<void*>(local, PC_Collider);
-        if (col) SetBehaviourEnabled(col, true);
-        SetNoclipLine("Noclip: ВЫКЛ", false);
+    const int want = on ? 1 : 0;
+    const int prev = g_NoclipApplied.load();
+
+    // Idle off path: do NOT call managed methods every frame.
+    if (!on && prev != 1) {
+        SetNoclipLine("Noclip: выкл", false);
+        g_NoclipApplied.store(0);
+        return;
+    }
+
+    // Already applied desired state — only lightly re-assert while ON (throttled by caller).
+    if (prev == want && !on) {
+        SetNoclipLine("Noclip: выкл", false);
         return;
     }
 
     void* col = Read<void*>(local, PC_Collider);
-    if (!col) {
-        SetNoclipLine("Noclip: FAIL — нет Collider", false);
+    if (!col || !IsReadablePtr(col, 0x18) || !IsUnityAlive(col)) {
+        SetNoclipLine(on ? "Noclip: FAIL — нет Collider" : "Noclip: выкл", false);
+        if (!on) g_NoclipApplied.store(0);
         return;
     }
 
-    SetBehaviourEnabled(col, false);
+    SetBehaviourEnabled(col, !on); // off collider => noclip on
+    if (on && IsReadablePtr(reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(local) + 0x4C), 1)) {
+        *reinterpret_cast<bool*>(reinterpret_cast<uintptr_t>(local) + 0x4C) = true; // moveable
+    }
+
+    if (!on) {
+        SetNoclipLine("Noclip: ВЫКЛ", false);
+        g_NoclipApplied.store(0);
+        return;
+    }
+
     bool en = GetBehaviourEnabled(col);
     if (en) {
         SetBehaviourEnabled(col, false);
         en = GetBehaviourEnabled(col);
     }
-
-    *reinterpret_cast<bool*>(reinterpret_cast<uintptr_t>(local) + 0x4C) = true; // moveable
-
     if (!en) {
         SetNoclipLine("Noclip: РАБОТАЕТ (collider off)", true);
+        g_NoclipApplied.store(1);
     } else {
         SetNoclipLine("Noclip: НЕ СРАБОТАЛ (collider on)", false);
+        g_NoclipApplied.store(-1);
     }
 }
 
@@ -345,25 +369,43 @@ void Game_ApplyCheats() {
         SetEngine("Движок: attach FAIL", false);
         return;
     }
-    SetEngine("Движок: OK", true);
+
+    // Warmup: only probe static LocalPlayer pointer — no Unity method calls yet.
+    if (g_WarmupTicks.load() < 60) { // ~2s at 30Hz after tick starts
+        SetEngine("Движок: OK | прогрев...", true);
+        return;
+    }
 
     void* local = GetLocalPlayer();
     if (!local) {
         g_Cheat.playerOk.store(false);
         SetEngine("Движок: OK | Игрок: ЖДУ МАТЧ", true);
-        SetNoclipLine(g_Cheat.noclip.load() ? "Noclip: ждёт игрока" : "Noclip: выкл", false);
+        if (!g_Cheat.noclip.load()) SetNoclipLine("Noclip: выкл", false);
+        else SetNoclipLine("Noclip: ждёт игрока", false);
+        g_NoclipApplied.store(-1);
         return;
     }
-    if (!IsUnityAlive(local)) {
+    if (!IsReadablePtr(local, 0x150) || !IsUnityAlive(local)) {
         g_Cheat.playerOk.store(false);
         SetEngine("Движок: OK | Игрок: битый ptr", true);
+        g_NoclipApplied.store(-1);
         return;
     }
 
     g_Cheat.playerOk.store(true);
     SetEngine("Движок: OK | Игрок: НАЙДЕН", true);
 
-    ApplyNoclip(local, g_Cheat.noclip.load());
+    const bool noclipOn = g_Cheat.noclip.load();
+    // Apply only on toggle / while actively holding noclip (re-assert ~1Hz via caller throttle)
+    static int s_NoclipHoldCounter = 0;
+    const int applied = g_NoclipApplied.load();
+    const bool needApply =
+            (noclipOn && applied != 1) ||
+            (!noclipOn && applied == 1) ||
+            (noclipOn && (++s_NoclipHoldCounter % 30) == 0);
+    if (!noclipOn) s_NoclipHoldCounter = 0;
+    if (needApply) ApplyNoclip(local, noclipOn);
+    else if (!noclipOn) SetNoclipLine("Noclip: выкл", false);
 
     if (g_Cheat.becomeMurderPending.exchange(false)) {
         SetMurderLine("Murder: применяю...", 0);

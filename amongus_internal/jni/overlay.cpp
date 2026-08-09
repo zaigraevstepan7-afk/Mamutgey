@@ -97,7 +97,7 @@ static void RefreshUnityScreenSize() {
 
 static void* TickThread(void*) {
     // Let Unity settle after inject before any IL2CPP work.
-    usleep(2500 * 1000);
+    usleep(4000 * 1000);
     Il2CppAttachThread();
     while (!g_Stop.load()) {
         Game_ApplyCheats();
@@ -365,7 +365,7 @@ bool Overlay_Start(JavaVM* vm) {
 
     if (g_Alive.load()) return true;
 
-    OLOGI("BUILD=20260809k memfix");
+    OLOGI("BUILD=20260809n crashfix");
 
     jobject appCl = GetAppClassLoader(env);
     if (!appCl) return false;

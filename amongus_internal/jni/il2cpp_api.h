@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <unistd.h>
+#include <errno.h>
 #include <android/log.h>
 
 #define LOG_TAG "AUInternal"
@@ -69,11 +71,28 @@ inline T AsPtr(uintptr_t rva) {
     return reinterpret_cast<T>(UBase + rva);
 }
 
+// Safe readability probe: kernel copy via pipe write (EFAULT if unmapped).
+inline bool IsReadablePtr(const void* p, size_t len = sizeof(void*)) {
+    if (!p || len == 0 || len > 512) return false;
+    auto addr = reinterpret_cast<uintptr_t>(p);
+    if (addr < 0x1000) return false;
+    if (addr > 0x0000FFFFFFFFFFFFULL) return false;
+    int fds[2];
+    if (pipe(fds) != 0) return false;
+    ssize_t n = write(fds[1], p, len);
+    const bool ok = (n == static_cast<ssize_t>(len));
+    close(fds[0]);
+    close(fds[1]);
+    return ok;
+}
+
 inline void* GetTypeInfo(uintptr_t typeInfoRva) {
     if (!UBase) return nullptr;
     void** slot = reinterpret_cast<void**>(UBase + typeInfoRva);
-    if (!slot) return nullptr;
-    return *slot;
+    if (!IsReadablePtr(slot, sizeof(void*))) return nullptr;
+    void* ti = *slot;
+    if (ti && !IsReadablePtr(ti, 0x20)) return nullptr;
+    return ti;
 }
 
 inline void* GetStaticFields(void* typeInfo) {
@@ -83,6 +102,7 @@ inline void* GetStaticFields(void* typeInfo) {
 
 inline bool IsUnityAlive(void* unityObj) {
     if (!unityObj) return false;
+    if (!IsReadablePtr(unityObj, 0x18)) return false;
     // UnityEngine.Object.m_CachedPtr at +0x10
     auto cached = *reinterpret_cast<uintptr_t*>(reinterpret_cast<uintptr_t>(unityObj) + 0x10);
     return cached != 0;
