@@ -78,6 +78,9 @@ public class AuOverlay {
     public static native boolean nativeGetNoclip();
     public static native void nativeBecomeMurder();
     public static native String nativeGetStatus();
+    public static native String nativeGetStatusEngine();
+    public static native String nativeGetStatusNoclip();
+    public static native String nativeGetStatusMurder();
     public static native void nativeSetViewSize(int w, int h);
     public static native void nativeLog(String msg);
     public static native int nativePlayerCount();
@@ -149,9 +152,9 @@ public class AuOverlay {
             espLp.gravity = Gravity.TOP | Gravity.START;
             wm.addView(espView, espLp);
 
-            // Compact floating panel
-            int panelW = dp(250);
-            int panelH = dp(230);
+            // Compact floating panel — taller for live status lines
+            int panelW = dp(268);
+            int panelH = dp(300);
             sheet = new MenuSheet(ctx);
             sheetLp = params(panelW, panelH, true);
             sheetLp.gravity = Gravity.TOP | Gravity.START;
@@ -266,7 +269,10 @@ public class AuOverlay {
         private final Paint accent = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint brand = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint brandSub = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint meta = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint statusOk = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint statusFail = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint statusIdle = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint statusTitle = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint rowLabel = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint rowHint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint divider = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -313,8 +319,22 @@ public class AuOverlay {
             brandSub.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
             if (Build.VERSION.SDK_INT >= 21) brandSub.setLetterSpacing(0.22f);
 
-            meta.setColor(C_MUTED);
-            meta.setTextSize(dpf(9));
+            statusTitle.setColor(0xFFA8B0C0);
+            statusTitle.setTextSize(dpf(8.5f));
+            statusTitle.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
+            if (Build.VERSION.SDK_INT >= 21) statusTitle.setLetterSpacing(0.12f);
+
+            statusOk.setColor(0xFF34D399);
+            statusOk.setTextSize(dpf(10));
+            statusOk.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+
+            statusFail.setColor(0xFFFF6B81);
+            statusFail.setTextSize(dpf(10));
+            statusFail.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+
+            statusIdle.setColor(C_MUTED);
+            statusIdle.setTextSize(dpf(10));
+            statusIdle.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
 
             rowLabel.setColor(C_ICE);
             rowLabel.setTextSize(dpf(13));
@@ -421,9 +441,37 @@ public class AuOverlay {
             }
         }
 
-        private float headerH() { return dpf(58); }
-        private float rowStart() { return dpf(66); }
+        private float headerH() { return dpf(112); }
+        private float rowStart() { return dpf(120); }
         private float rowH() { return dpf(48); }
+
+        private static boolean looksOk(String s) {
+            if (s == null) return false;
+            return s.indexOf("РАБОТАЕТ") >= 0
+                    || s.indexOf("СРАБОТАЛО") >= 0
+                    || s.indexOf("НАЙДЕН") >= 0;
+        }
+
+        private static boolean looksFail(String s) {
+            if (s == null) return false;
+            return s.indexOf("FAIL") >= 0
+                    || s.indexOf("НЕ СРАБОТАЛ") >= 0
+                    || s.indexOf("битый") >= 0
+                    || s.indexOf("нет il2cpp") >= 0
+                    || s.indexOf("attach FAIL") >= 0;
+        }
+
+        private Paint statusPaint(String s) {
+            if (looksFail(s)) return statusFail;
+            if (looksOk(s)) return statusOk;
+            return statusIdle;
+        }
+
+        private String safeStatus(String s, String fallback) {
+            if (s == null || s.length() == 0) return fallback;
+            if (s.length() > 42) return s.substring(0, 42);
+            return s;
+        }
 
         @Override protected void onDraw(Canvas c) {
             tickThumbs();
@@ -453,13 +501,30 @@ public class AuOverlay {
             c.drawText("AMONG US", bx, dpf(32), brand);
             float brandW = brand.measureText("AMONG US ");
             c.drawText("INTERNAL", bx + brandW, dpf(32), brandSub);
-            String st = "";
+
+            c.drawText("СТАТУС — ЧТО РАБОТАЕТ", bx, dpf(48), statusTitle);
+
+            String eng = "Движок: ...";
+            String noc = "Noclip: ...";
+            String mur = "Murder: ...";
             try {
-                String s = nativeGetStatus();
-                if (s != null) st = s;
+                String a = nativeGetStatusEngine();
+                String b = nativeGetStatusNoclip();
+                String d = nativeGetStatusMurder();
+                if (a != null) eng = a;
+                if (b != null) noc = b;
+                if (d != null) mur = d;
             } catch (Throwable ignored) {}
-            if (st.length() > 28) st = st.substring(0, 28);
-            c.drawText(st.length() > 0 ? st : "noclip · murderer", bx, dpf(46), meta);
+
+            eng = safeStatus(eng, "Движок: ...");
+            noc = safeStatus(noc, "Noclip: ...");
+            mur = safeStatus(mur, "Murder: ...");
+
+            c.drawText(eng, bx, dpf(64), statusPaint(eng));
+            c.drawText(noc, bx, dpf(78), statusPaint(noc));
+            c.drawText(mur, bx, dpf(92), statusPaint(mur));
+
+            c.drawLine(bx, dpf(104), w - bx, dpf(104), divider);
 
             float y = rowStart();
             float rh = rowH();

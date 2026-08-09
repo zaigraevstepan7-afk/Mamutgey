@@ -249,10 +249,21 @@ static void J_nativeSetNoclip(JNIEnv*, jclass, jboolean v) {
 static jboolean J_nativeGetNoclip(JNIEnv*, jclass) { return g_Cheat.noclip.load(); }
 static void J_nativeBecomeMurder(JNIEnv*, jclass) {
     g_Cheat.becomeMurderPending.store(true);
+    // Immediate UI feedback until ApplyCheats runs
+    g_Cheat.murderResult.store(0);
     LOGI("becomeMurder pending");
 }
 static jstring J_nativeGetStatus(JNIEnv* env, jclass) {
     return env->NewStringUTF(Game_Status());
+}
+static jstring J_nativeGetStatusEngine(JNIEnv* env, jclass) {
+    return env->NewStringUTF(Game_StatusEngine());
+}
+static jstring J_nativeGetStatusNoclip(JNIEnv* env, jclass) {
+    return env->NewStringUTF(Game_StatusNoclip());
+}
+static jstring J_nativeGetStatusMurder(JNIEnv* env, jclass) {
+    return env->NewStringUTF(Game_StatusMurder());
 }
 
 static void J_nativeSetViewSize(JNIEnv*, jclass, jint w, jint h) {
@@ -295,6 +306,9 @@ static JNINativeMethod g_Methods[] = {
     {const_cast<char*>("nativeGetNoclip"), const_cast<char*>("()Z"), (void*)J_nativeGetNoclip},
     {const_cast<char*>("nativeBecomeMurder"), const_cast<char*>("()V"), (void*)J_nativeBecomeMurder},
     {const_cast<char*>("nativeGetStatus"), const_cast<char*>("()Ljava/lang/String;"), (void*)J_nativeGetStatus},
+    {const_cast<char*>("nativeGetStatusEngine"), const_cast<char*>("()Ljava/lang/String;"), (void*)J_nativeGetStatusEngine},
+    {const_cast<char*>("nativeGetStatusNoclip"), const_cast<char*>("()Ljava/lang/String;"), (void*)J_nativeGetStatusNoclip},
+    {const_cast<char*>("nativeGetStatusMurder"), const_cast<char*>("()Ljava/lang/String;"), (void*)J_nativeGetStatusMurder},
     {const_cast<char*>("nativeSetViewSize"), const_cast<char*>("(II)V"), (void*)J_nativeSetViewSize},
     {const_cast<char*>("nativeLog"), const_cast<char*>("(Ljava/lang/String;)V"), (void*)J_nativeLog},
     {const_cast<char*>("nativePlayerCount"), const_cast<char*>("()I"), (void*)J_nativePlayerCount},

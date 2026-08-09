@@ -34,6 +34,12 @@ struct CheatState {
 
     std::atomic<bool> noclip{false};
     std::atomic<bool> becomeMurderPending{false};
+
+    // Live feedback for menu
+    std::atomic<bool> engineOk{false};
+    std::atomic<bool> playerOk{false};
+    std::atomic<bool> noclipWorking{false};
+    std::atomic<int> murderResult{0}; // 0=none, 1=ok, 2=fail
 };
 
 inline CheatState g_Cheat;
@@ -47,3 +53,6 @@ void Game_ApplyCheats();
 uintptr_t FindLibBase(const char* name);
 void* Game_GetLocalPlayer();
 const char* Game_Status();
+const char* Game_StatusEngine();
+const char* Game_StatusNoclip();
+const char* Game_StatusMurder();

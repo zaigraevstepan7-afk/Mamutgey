@@ -38,7 +38,7 @@ static void StartHackOnce() {
 
 extern "C" jint JNI_OnLoad(JavaVM* vm, void*) {
     g_VM = vm;
-    LOGI("JNI_OnLoad — Among Us Internal 2026.6.5 (overlay build)");
+    LOGI("JNI_OnLoad — Among Us Internal 2026.6.5 (20260809m status UI)");
     StartHackOnce();
     return JNI_VERSION_1_6;
 }

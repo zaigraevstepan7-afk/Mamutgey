@@ -12,6 +12,9 @@ using namespace Offsets;
 static std::atomic<bool> g_Il2CppThreadReady{false};
 static std::atomic<int> g_WarmupTicks{0};
 static char g_Status[192] = "init";
+static char g_StatusEngine[64] = "Движок: загрузка...";
+static char g_StatusNoclip[64] = "Noclip: выкл";
+static char g_StatusMurder[64] = "Murder: ещё не жали";
 
 static void SetStatus(const char* s) {
     if (!s) return;
@@ -21,6 +24,25 @@ static void SetStatus(const char* s) {
 }
 
 const char* Game_Status() { return g_Status; }
+const char* Game_StatusEngine() { return g_StatusEngine; }
+const char* Game_StatusNoclip() { return g_StatusNoclip; }
+const char* Game_StatusMurder() { return g_StatusMurder; }
+
+static void SetEngine(const char* s, bool ok) {
+    strncpy(g_StatusEngine, s, sizeof(g_StatusEngine) - 1);
+    g_StatusEngine[sizeof(g_StatusEngine) - 1] = 0;
+    g_Cheat.engineOk.store(ok);
+}
+static void SetNoclipLine(const char* s, bool working) {
+    strncpy(g_StatusNoclip, s, sizeof(g_StatusNoclip) - 1);
+    g_StatusNoclip[sizeof(g_StatusNoclip) - 1] = 0;
+    g_Cheat.noclipWorking.store(working);
+}
+static void SetMurderLine(const char* s, int result) {
+    strncpy(g_StatusMurder, s, sizeof(g_StatusMurder) - 1);
+    g_StatusMurder[sizeof(g_StatusMurder) - 1] = 0;
+    g_Cheat.murderResult.store(result);
+}
 
 uintptr_t FindLibBase(const char* name) {
     std::ifstream maps("/proc/self/maps");
@@ -236,90 +258,115 @@ static void* GetRoleManagerInstance() {
 static void DoBecomeMurderer(void* local) {
     if (!local || !IsUnityAlive(local)) {
         SetStatus("murder: no local");
+        SetMurderLine("Murder: FAIL — нет игрока", 2);
         return;
     }
 
     const uint16_t role = static_cast<uint16_t>(RoleTypes::Impostor);
 
-    // 1) Networked RPC
     using RpcFn = void (*)(void*, uint16_t, bool, const void*);
     AsPtr<RpcFn>(PlayerControl_RpcSetRole)(local, role, true, nullptr);
 
-    // 2) RoleManager.SetRole (needs real Instance)
     void* rm = GetRoleManagerInstance();
     if (rm) {
         using SetFn = void (*)(void*, void*, uint16_t, const void*);
         AsPtr<SetFn>(RoleManager_SetRole)(rm, local, role, nullptr);
     }
 
-    // 3) Kill timer via proper setter
     using KillFn = void (*)(void*, float, const void*);
     AsPtr<KillFn>(PlayerControl_SetKillTimer)(local, 0.f, nullptr);
 
-    // 4) Direct memory writes as fallback (verified dump offsets)
     void* data = Read<void*>(local, PC_CachedPlayerData);
+    bool wrote = false;
     if (data) {
         *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(data) + NPI_RoleType) = role;
         void* roleBeh = Read<void*>(data, NPI_Role);
         if (roleBeh) {
             *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(roleBeh) + RB_Role) = role;
-            *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(roleBeh) + RB_TeamType) = 1; // Impostor
+            *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(roleBeh) + RB_TeamType) = 1;
             *reinterpret_cast<bool*>(reinterpret_cast<uintptr_t>(roleBeh) + RB_CanUseKillButton) = true;
+            wrote = true;
         }
+        // Verify write
+        auto check = *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(data) + NPI_RoleType);
+        if (check == role) wrote = true;
     }
 
-    SetStatus("murder applied");
+    if (wrote) {
+        SetStatus("murder applied");
+        SetMurderLine("Murder: СРАБОТАЛО (Impostor)", 1);
+    } else {
+        SetStatus("murder partial");
+        SetMurderLine("Murder: вызов ок, роль ? (нужен хост/матч)", 2);
+    }
 }
 
 static void ApplyNoclip(void* local, bool on) {
-    if (!local || !IsUnityAlive(local)) return;
+    if (!local || !IsUnityAlive(local)) {
+        SetNoclipLine("Noclip: нет игрока", false);
+        return;
+    }
 
-    // Primary: PlayerControl.Collider (dump 0xC8) — wall collision
+    if (!on) {
+        void* col = Read<void*>(local, PC_Collider);
+        if (col) SetBehaviourEnabled(col, true);
+        SetNoclipLine("Noclip: ВЫКЛ", false);
+        return;
+    }
+
     void* col = Read<void*>(local, PC_Collider);
-    if (col) {
-        SetBehaviourEnabled(col, !on);
-        bool en = GetBehaviourEnabled(col);
-        // If managed call didn't stick, we still report
-        if (on && en) {
-            // retry once
-            SetBehaviourEnabled(col, false);
-        }
+    if (!col) {
+        SetNoclipLine("Noclip: FAIL — нет Collider", false);
+        return;
     }
 
-    // Also toggle physics body simulated? NO — that freezes movement.
-    // Instead ensure moveable flag is true when noclip on
-    if (on) {
-        *reinterpret_cast<bool*>(reinterpret_cast<uintptr_t>(local) + 0x4C) = true; // moveable
+    SetBehaviourEnabled(col, false);
+    bool en = GetBehaviourEnabled(col);
+    if (en) {
+        SetBehaviourEnabled(col, false);
+        en = GetBehaviourEnabled(col);
     }
 
-    static int logThrottle = 0;
-    if ((++logThrottle % 60) == 0) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "noclip=%d col=%p en=%d",
-                 on ? 1 : 0, col, col ? (GetBehaviourEnabled(col) ? 1 : 0) : -1);
-        SetStatus(buf);
+    *reinterpret_cast<bool*>(reinterpret_cast<uintptr_t>(local) + 0x4C) = true; // moveable
+
+    if (!en) {
+        SetNoclipLine("Noclip: РАБОТАЕТ (collider off)", true);
+    } else {
+        SetNoclipLine("Noclip: НЕ СРАБОТАЛ (collider on)", false);
     }
 }
 
 void Game_ApplyCheats() {
-    if (!Il2CppReady()) return;
-    if (!Il2CppAttachThread()) return;
+    if (!Il2CppReady()) {
+        SetEngine("Движок: нет il2cpp", false);
+        return;
+    }
+    if (!Il2CppAttachThread()) {
+        SetEngine("Движок: attach FAIL", false);
+        return;
+    }
+    SetEngine("Движок: OK", true);
 
     void* local = GetLocalPlayer();
     if (!local) {
-        static int t = 0;
-        if ((++t % 90) == 0) SetStatus("wait LocalPlayer");
+        g_Cheat.playerOk.store(false);
+        SetEngine("Движок: OK | Игрок: ЖДУ МАТЧ", true);
+        SetNoclipLine(g_Cheat.noclip.load() ? "Noclip: ждёт игрока" : "Noclip: выкл", false);
         return;
     }
     if (!IsUnityAlive(local)) {
-        SetStatus("LocalPlayer dead ptr");
+        g_Cheat.playerOk.store(false);
+        SetEngine("Движок: OK | Игрок: битый ptr", true);
         return;
     }
 
-    // Always apply noclip state (re-assert each tick)
+    g_Cheat.playerOk.store(true);
+    SetEngine("Движок: OK | Игрок: НАЙДЕН", true);
+
     ApplyNoclip(local, g_Cheat.noclip.load());
 
     if (g_Cheat.becomeMurderPending.exchange(false)) {
+        SetMurderLine("Murder: применяю...", 0);
         DoBecomeMurderer(local);
     }
 }
