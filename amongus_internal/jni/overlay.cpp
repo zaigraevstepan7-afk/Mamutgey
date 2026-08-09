@@ -91,11 +91,19 @@ static void ColorFor(const EspPlayer& p, bool murder, float& r, float& g, float&
 }
 
 static void RefreshUnityScreenSize() {
-    if (!UBase) return;
-    using Fn = int (*)(const void*);
-    int w = AsPtr<Fn>(0x441B53C)(nullptr);
-    int h = AsPtr<Fn>(0x441B564)(nullptr);
-    if (w > 0 && h > 0) { g_UnityW = w; g_UnityH = h; }
+    // Do NOT call Unity Screen.get_width/height from overlay/UI thread —
+    // that was a frequent inject crash. View size from nativeSetViewSize is enough.
+}
+
+static void* TickThread(void*) {
+    // Let Unity settle after inject before any IL2CPP work.
+    usleep(2500 * 1000);
+    Il2CppAttachThread();
+    while (!g_Stop.load()) {
+        Game_TickCollect();
+        usleep(32 * 1000); // ~30 Hz — less pressure on Unity
+    }
+    return nullptr;
 }
 
 static bool ShouldShow(const EspPlayer& p) {
@@ -235,6 +243,9 @@ static jboolean J_nativeGetName(JNIEnv*, jclass) { return g_Cheat.espName.load()
 static void J_nativeSetViewSize(JNIEnv*, jclass, jint w, jint h) {
     if (w > 0) g_ViewW = w;
     if (h > 0) g_ViewH = h;
+    // Fallback so ESP scale is 1:1 until we know Unity screen size
+    if (g_UnityW <= 0 && w > 0) g_UnityW = w;
+    if (g_UnityH <= 0 && h > 0) g_UnityH = h;
 }
 static void J_nativeLog(JNIEnv* env, jclass, jstring msg) {
     if (!msg) return;
@@ -309,14 +320,6 @@ static jclass LoadOverlayClass(JNIEnv* env, jobject appCl) {
     return (jclass)env->NewGlobalRef(clsObj);
 }
 
-static void* TickThread(void*) {
-    while (!g_Stop.load()) {
-        Game_TickCollect();
-        usleep(16 * 1000);
-    }
-    return nullptr;
-}
-
 bool Overlay_IsAlive() { return g_Alive.load(); }
 void Overlay_Shutdown() { g_Stop.store(true); g_Alive.store(false); }
 
@@ -330,7 +333,7 @@ bool Overlay_Start(JavaVM* vm) {
 
     if (g_Alive.load()) return true;
 
-    OLOGI("BUILD=20260809g handle-menu");
+    OLOGI("BUILD=20260809h crashfix");
 
     jobject appCl = GetAppClassLoader(env);
     if (!appCl) return false;

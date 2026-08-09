@@ -6,7 +6,6 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.LinearGradient;
 import android.graphics.Paint;
-import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.RadialGradient;
 import android.graphics.RectF;
@@ -15,14 +14,12 @@ import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
-import android.provider.Settings;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.animation.DecelerateInterpolator;
 import android.view.animation.OvershootInterpolator;
-import android.widget.Toast;
 
 /**
  * Among Us internal overlay — white bottom strip opens a polished sheet menu.
@@ -90,7 +87,6 @@ public class AuOverlay {
 
     private static class StartUi implements Runnable {
         public void run() {
-            nativeLog("AuOverlay.start UI");
             tryAttach();
         }
     }
@@ -100,14 +96,13 @@ public class AuOverlay {
         tries++;
         try {
             View decor = activity.getWindow().getDecorView();
-            if (decor.getWindowToken() == null && tries < 50) {
+            if (decor.getWindowToken() == null && tries < 80) {
                 decor.postDelayed(attachRetry, 200);
                 return;
             }
             attachNow();
         } catch (Throwable t) {
-            nativeLog("tryAttach: " + t);
-            if (tries < 50) ui.postDelayed(attachRetry, 300);
+            if (tries < 80) ui.postDelayed(attachRetry, 300);
         }
     }
 
@@ -124,36 +119,41 @@ public class AuOverlay {
 
     private static void attachNow() {
         if (attached) return;
-        Context ctx = activity;
-        wm = activity.getWindowManager();
-
-        espView = new EspView(ctx);
-        espLp = params(WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT, false);
-        espLp.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
-        espLp.gravity = Gravity.TOP | Gravity.START;
-        wm.addView(espView, espLp);
-
-        sheet = new MenuSheet(ctx);
-        int sheetH = Math.round(activity.getResources().getDisplayMetrics().heightPixels * 0.58f);
-        sheetLp = params(WindowManager.LayoutParams.MATCH_PARENT, sheetH, true);
-        sheetLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        sheet.setVisibility(View.GONE);
-        sheet.setAlpha(0f);
-        wm.addView(sheet, sheetLp);
-
-        handle = new HandleView(ctx);
-        handleLp = params(WindowManager.LayoutParams.MATCH_PARENT, dp(40), true);
-        handleLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        wm.addView(handle, handleLp);
-        handle.setOnClickListener(new HandleClick());
-
-        attached = true;
-        ui.post(ticker);
         try {
-            Toast.makeText(activity, "AU ready — tap white bar", Toast.LENGTH_SHORT).show();
-        } catch (Throwable ignored) {}
-        nativeLog("ATTACH OK handle-strip");
+            Context ctx = activity;
+            wm = activity.getWindowManager();
+
+            espView = new EspView(ctx);
+            espLp = params(WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.MATCH_PARENT, false);
+            espLp.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+            espLp.gravity = Gravity.TOP | Gravity.START;
+            wm.addView(espView, espLp);
+
+            sheet = new MenuSheet(ctx);
+            int sheetH = Math.round(activity.getResources().getDisplayMetrics().heightPixels * 0.58f);
+            sheetLp = params(WindowManager.LayoutParams.MATCH_PARENT, sheetH, true);
+            sheetLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+            sheet.setVisibility(View.GONE);
+            sheet.setAlpha(0f);
+            wm.addView(sheet, sheetLp);
+
+            handle = new HandleView(ctx);
+            handleLp = params(WindowManager.LayoutParams.MATCH_PARENT, dp(40), true);
+            handleLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+            wm.addView(handle, handleLp);
+            handle.setOnClickListener(new HandleClick());
+
+            attached = true;
+            ui.post(ticker);
+        } catch (Throwable t) {
+            // Silent retry — never toast / never announce inject
+            attached = false;
+            espView = null;
+            sheet = null;
+            handle = null;
+            if (tries < 80) ui.postDelayed(attachRetry, 400);
+        }
     }
 
     private static class HideSheet implements Runnable {
@@ -167,11 +167,8 @@ public class AuOverlay {
     }
 
     private static WindowManager.LayoutParams params(int w, int h, boolean touchable) {
+        // Always TYPE_APPLICATION via Activity WindowManager — OVERLAY needs permission and crashes inject.
         int type = WindowManager.LayoutParams.TYPE_APPLICATION;
-        try {
-            if (Build.VERSION.SDK_INT >= 23 && Settings.canDrawOverlays(activity))
-                type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
-        } catch (Throwable ignored) {}
 
         int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
@@ -255,11 +252,6 @@ public class AuOverlay {
                     cx + nubW * 0.5f, cy + nubH * 0.5f);
             bar.setColor(0xFFFFFFFF);
             c.drawRoundRect(nub, nubH, nubH, bar);
-
-            if (!expanded) {
-                hint.setAlpha((int) (100 + 80 * pulse));
-                c.drawText("MENU", cx, stripY - dpf(6), hint);
-            }
         }
     }
 
@@ -283,7 +275,6 @@ public class AuOverlay {
         private final Paint wash = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint grip = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final RectF tmp = new RectF();
-        private final Path clip = new Path();
 
         private final float[] thumbNow = new float[]{0, 0, 0, 0, 0};
         private final float[] thumbTo = new float[]{0, 0, 0, 0, 0};
@@ -421,28 +412,25 @@ public class AuOverlay {
         @Override protected void onDraw(Canvas c) {
             tickThumbs();
             float w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
             float rad = dpf(28);
 
-            clip.reset();
+            // Round panel without clipPath (clipPath crashes on some GPUs / software canvas)
             tmp.set(0, 0, w, h);
-            clip.addRoundRect(tmp, rad, rad, Path.Direction.CW);
-            c.save();
-            c.clipPath(clip);
-
             bg.setShader(new LinearGradient(0, 0, 0, h, C_PANEL2, C_PANEL, Shader.TileMode.CLAMP));
-            c.drawRect(0, 0, w, h, bg);
+            c.drawRoundRect(tmp, rad, rad, bg);
 
             wash.setShader(new RadialGradient(w * 0.85f, dpf(-20), w * 0.75f,
                     0x55E11D48, Color.TRANSPARENT, Shader.TileMode.CLAMP));
-            c.drawRect(0, 0, w, h, wash);
+            c.drawRoundRect(tmp, rad, rad, wash);
             wash.setShader(new RadialGradient(w * 0.12f, h * 0.92f, w * 0.55f,
                     0x221E3A5F, Color.TRANSPARENT, Shader.TileMode.CLAMP));
-            c.drawRect(0, 0, w, h, wash);
+            c.drawRoundRect(tmp, rad, rad, wash);
 
             accent.setStyle(Paint.Style.FILL);
             accent.setShader(new LinearGradient(0, 0, w, 0,
                     0x00FF4D6D, 0xFFE11D48, Shader.TileMode.CLAMP));
-            c.drawRect(0, 0, w, dpf(3), accent);
+            c.drawRect(rad, 0, w - rad, dpf(3), accent);
             accent.setShader(null);
 
             float gw = dpf(42), gh = dpf(4);
@@ -489,8 +477,6 @@ public class AuOverlay {
             float chipY = h - dpf(36);
             drawChip(c, dpf(24), chipY, "PLAYERS  " + pc, false);
             drawChip(c, dpf(24) + dpf(118), chipY, "MURDER  " + mc, mc > 0);
-
-            c.restore();
         }
 
         private void drawChip(Canvas c, float x, float cy, String text, boolean hot) {

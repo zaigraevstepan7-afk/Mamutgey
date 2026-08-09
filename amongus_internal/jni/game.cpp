@@ -3,8 +3,13 @@
 #include <fstream>
 #include <sstream>
 #include <unistd.h>
+#include <dlfcn.h>
+#include <atomic>
 
 using namespace Offsets;
+
+static std::atomic<bool> g_Il2CppThreadReady{false};
+static std::atomic<int> g_WarmupTicks{0};
 
 uintptr_t FindLibBase(const char* name) {
     std::ifstream maps("/proc/self/maps");
@@ -12,7 +17,6 @@ uintptr_t FindLibBase(const char* name) {
     uintptr_t best = 0;
     while (std::getline(maps, line)) {
         if (line.find(name) == std::string::npos) continue;
-        // Require path ends with libil2cpp.so (avoid false matches)
         if (line.find("libil2cpp.so") == std::string::npos) continue;
         uintptr_t start = 0;
         std::stringstream ss(line);
@@ -22,7 +26,7 @@ uintptr_t FindLibBase(const char* name) {
         if (isExec) {
             if (!best || start < best) best = start;
         } else if (!best) {
-            best = start; // fallback first mapping
+            best = start;
         }
     }
     return best;
@@ -34,6 +38,34 @@ bool Il2CppReady() {
         if (UBase) LOGI("libil2cpp.so @ %p", (void*)UBase);
     }
     return UBase != 0;
+}
+
+// Must call once on the tick thread before any managed IL2CPP invokes.
+bool Il2CppAttachThread() {
+    if (g_Il2CppThreadReady.load()) return true;
+    if (!Il2CppReady()) return false;
+
+    void* mod = dlopen("libil2cpp.so", RTLD_NOW);
+    if (!mod) mod = dlopen("libil2cpp.so", RTLD_NOLOAD);
+    if (!mod) {
+        LOGE("dlopen libil2cpp failed");
+        return false;
+    }
+
+    using DomainFn = void* (*)();
+    using AttachFn = void* (*)(void*);
+    auto domain_get = reinterpret_cast<DomainFn>(dlsym(mod, "il2cpp_domain_get"));
+    auto thread_attach = reinterpret_cast<AttachFn>(dlsym(mod, "il2cpp_thread_attach"));
+    if (!domain_get || !thread_attach) {
+        LOGE("il2cpp_domain_get/thread_attach missing");
+        return false;
+    }
+    void* domain = domain_get();
+    if (!domain) return false;
+    thread_attach(domain);
+    g_Il2CppThreadReady.store(true);
+    LOGI("il2cpp_thread_attach OK");
+    return true;
 }
 
 static void* Call_get_transform(void* component) {
@@ -60,34 +92,9 @@ static Vector3 Call_WorldToScreen(void* cam, Vector3 world) {
     return out;
 }
 
-// Read Default outfit (PlayerOutfitType=0) from NPI.Outfits without managed calls.
-// Dictionary`2 arm64: buckets@0x10, entries@0x18, count@0x20
-// Entry<int,object>: hash@0, next@4, key@8, value@16 (size 24)
-static void* TryGetDefaultOutfit(void* npi) {
-    void* dict = Read<void*>(npi, NPI_Outfits);
-    if (!dict) return nullptr;
-    auto* entries = *reinterpret_cast<Il2CppArray**>(reinterpret_cast<uintptr_t>(dict) + 0x18);
-    int32_t count = *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(dict) + 0x20);
-    if (!entries || count <= 0 || entries->max_length == 0 || entries->max_length > 64)
-        return nullptr;
-    constexpr size_t kEntrySize = 24;
-    auto* base = reinterpret_cast<uint8_t*>(&entries->vector[0]);
-    const uintptr_t n = entries->max_length;
-    for (uintptr_t i = 0; i < n; ++i) {
-        uint8_t* e = base + i * kEntrySize;
-        int32_t hash = *reinterpret_cast<int32_t*>(e);
-        if (hash < 0) continue;
-        int32_t key = *reinterpret_cast<int32_t*>(e + 8);
-        if (key != 0) continue; // PlayerOutfitType.Default
-        void* val = *reinterpret_cast<void**>(e + 16);
-        // PlayerOutfit is a plain managed object (not UnityEngine.Object)
-        if (val) return val;
-    }
-    return nullptr;
-}
-
 static void* GetLocalPlayer() {
     void* ti = GetTypeInfo(PlayerControl_TypeInfo);
+    if (!ti) return nullptr;
     void* sf = GetStaticFields(ti);
     if (!sf) return nullptr;
     return *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(sf) + PC_LocalPlayer);
@@ -95,6 +102,7 @@ static void* GetLocalPlayer() {
 
 static void* GetAllPlayersList() {
     void* ti = GetTypeInfo(PlayerControl_TypeInfo);
+    if (!ti) return nullptr;
     void* sf = GetStaticFields(ti);
     if (!sf) return nullptr;
     return *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(sf) + PC_AllPlayerControls);
@@ -102,6 +110,7 @@ static void* GetAllPlayersList() {
 
 static int GetGameState() {
     void* ti = GetTypeInfo(AmongUsClient_TypeInfo);
+    if (!ti) return -1;
     void* sf = GetStaticFields(ti);
     if (!sf) return -1;
     void* client = *reinterpret_cast<void**>(sf);
@@ -111,6 +120,13 @@ static int GetGameState() {
 
 void Game_TickCollect() {
     if (!Il2CppReady()) return;
+    if (!Il2CppAttachThread()) return;
+
+    // Warm up a few seconds after attach before touching gameplay objects.
+    int warm = g_WarmupTicks.fetch_add(1);
+    if (warm < 180) { // ~3s at 16ms
+        return;
+    }
 
     std::vector<EspPlayer> next;
     int state = GetGameState();
@@ -142,8 +158,12 @@ void Game_TickCollect() {
         return;
     }
 
-    void* cam = Call_Camera_main();
-    if (cam && !IsUnityAlive(cam)) cam = nullptr;
+    void* cam = nullptr;
+    // Camera only once match is running — safer than lobby.
+    if (state == static_cast<int>(GameStates::Started)) {
+        cam = Call_Camera_main();
+        if (cam && !IsUnityAlive(cam)) cam = nullptr;
+    }
 
     Vector3 localPos{};
     bool haveLocalPos = false;
@@ -167,7 +187,6 @@ void Game_TickCollect() {
         ep.playerId = Read<uint8_t>(player, PC_PlayerId);
         ep.isLocal = (player == local);
 
-        // Prefer field only — avoid managed get_Data on worker thread when possible
         void* data = Read<void*>(player, PC_CachedPlayerData);
         if (data && !IsUnityAlive(data)) data = nullptr;
         ep.data = data;
@@ -188,19 +207,10 @@ void Game_TickCollect() {
             } else {
                 ep.isMurder = IsMurderRole(ep.role);
             }
+        }
 
-            // Name / color from outfit fields — no managed getters (worker thread unsafe)
-            void* outfit = TryGetDefaultOutfit(data);
-            if (outfit) {
-                ep.colorId = Read<int32_t>(outfit, Outfit_ColorId);
-                ep.name = Il2CppStringToUtf8(Read<Il2CppString*>(outfit, Outfit_PlayerName));
-            }
-            if (ep.name.empty()) {
-                char tmp[32];
-                snprintf(tmp, sizeof(tmp), "P%u", ep.playerId);
-                ep.name = tmp;
-            }
-        } else {
+        // Safe fallback name — no outfit dictionary walks (crashy on worker thread)
+        {
             char tmp[32];
             snprintf(tmp, sizeof(tmp), "P%u", ep.playerId);
             ep.name = tmp;
@@ -213,7 +223,6 @@ void Game_TickCollect() {
 
         if (cam) {
             Vector3 sp = Call_WorldToScreen(cam, ep.world);
-            // Orthographic: z is depth; behind camera typically z < 0
             ep.onScreen = (sp.z > 0.f);
             ep.screen = {sp.x, sp.y};
         }

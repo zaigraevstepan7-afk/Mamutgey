@@ -38,5 +38,6 @@ inline std::mutex g_EspMutex;
 inline std::vector<EspPlayer> g_EspSnapshot;
 
 bool Il2CppReady();
+bool Il2CppAttachThread();
 void Game_TickCollect();
 uintptr_t FindLibBase(const char* name);

@@ -10,26 +10,20 @@ static JavaVM* g_VM = nullptr;
 static std::atomic<bool> g_HackStarted{false};
 
 static void* HackThread(void*) {
-    LOGI("hack thread — waiting for libil2cpp + Unity activity");
+    // Wait for game process to settle after Kitty inject
+    usleep(1500 * 1000);
 
     for (int i = 0; i < 400; ++i) {
         if (Il2CppReady()) break;
         usleep(50 * 1000);
     }
-    if (!UBase) LOGE("libil2cpp.so not found yet (will keep retrying in tick)");
 
-    // Primary UI path: Android View overlay (works on Vulkan + GLES)
     if (g_VM) {
-        for (int i = 0; i < 100; ++i) {
-            if (Overlay_Start(g_VM)) {
-                LOGI("overlay OK — look for red MENU button on the left");
-                return nullptr;
-            }
-            usleep(100 * 1000);
+        for (int i = 0; i < 120; ++i) {
+            if (Overlay_Start(g_VM)) return nullptr;
+            usleep(150 * 1000);
         }
-        LOGE("overlay failed to start — check logcat AUInternal");
-    } else {
-        LOGE("JavaVM is null (JNI_OnLoad not called?)");
+        LOGE("overlay failed to start");
     }
     return nullptr;
 }
