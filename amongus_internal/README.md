@@ -24,6 +24,7 @@ adb push AndKittyInjector /data/local/tmp/
 adb shell chmod 755 /data/local/tmp/AndKittyInjector
 
 # App already running:
+adb push amongus_internal/libs/arm64-v8a/libau_internal.so /data/local/tmp/
 adb shell /data/local/tmp/AndKittyInjector \
   --package com.innersloth.spacemafia \
   --libs /data/local/tmp/libau_internal.so
@@ -34,6 +35,8 @@ adb shell /data/local/tmp/AndKittyInjector \
   --libs /data/local/tmp/libau_internal.so \
   --launch --delay 3000000
 ```
+
+Prebuilt `.so` is already in `amongus_internal/libs/arm64-v8a/libau_internal.so`.
 
 Kitty injector: https://github.com/MJx0/AndKittyInjector (or forks such as tuyilmaz/AndKittyInjector)
 
