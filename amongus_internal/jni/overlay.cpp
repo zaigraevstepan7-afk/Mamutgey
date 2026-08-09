@@ -330,7 +330,7 @@ bool Overlay_Start(JavaVM* vm) {
 
     if (g_Alive.load()) return true;
 
-    OLOGI("BUILD=20260809f bugfix");
+    OLOGI("BUILD=20260809g handle-menu");
 
     jobject appCl = GetAppClassLoader(env);
     if (!appCl) return false;
