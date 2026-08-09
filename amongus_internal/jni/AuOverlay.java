@@ -6,25 +6,27 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.PixelFormat;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.view.Gravity;
-import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.CompoundButton;
-import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
 /**
- * Floating menu via WindowManager.TYPE_APPLICATION_PANEL (above Unity SurfaceView).
+ * LGL-style Activity WindowManager overlay (TYPE_APPLICATION).
+ * Does NOT use content.addView (Unity SurfaceView covers it).
  */
 public class AuOverlay {
+    private static final String TAG = "AUInternal";
     private static Activity activity;
     private static WindowManager wm;
     private static WindowManager.LayoutParams fabLp;
@@ -35,11 +37,19 @@ public class AuOverlay {
     private static EspView espView;
     private static boolean menuOpen = false;
     private static boolean attached = false;
+    private static int tries = 0;
     private static final Handler ui = new Handler(Looper.getMainLooper());
+
     private static final Runnable ticker = new Runnable() {
         @Override public void run() {
-            if (espView != null) espView.postInvalidate();
+            if (espView != null) espView.invalidate();
             if (attached) ui.postDelayed(this, 16);
+        }
+    };
+
+    private static final Runnable attachRetry = new Runnable() {
+        @Override public void run() {
+            tryAttach();
         }
     };
 
@@ -54,95 +64,127 @@ public class AuOverlay {
     public static native boolean nativeGetEsp();
     public static native boolean nativeGetMurderEsp();
     public static native void nativeSetViewSize(int w, int h);
+    public static native void nativeLog(String msg);
 
     public static void start(final Activity act) {
-        if (act == null) return;
         activity = act;
         ui.post(new Runnable() {
             @Override public void run() {
+                nativeLog("AuOverlay.start on UI thread");
                 try {
-                    attachLocked();
+                    Toast.makeText(act, "AU loading menu…", Toast.LENGTH_SHORT).show();
                 } catch (Throwable t) {
-                    t.printStackTrace();
-                    try {
-                        Toast.makeText(act, "AU overlay FAIL: " + t.getMessage(), Toast.LENGTH_LONG).show();
-                    } catch (Throwable ignored) {}
+                    nativeLog("toast1 fail: " + t);
                 }
+                tryAttach();
             }
         });
     }
 
-    private static void attachLocked() {
-        if (attached || activity == null) return;
+    private static void tryAttach() {
+        if (attached) return;
+        tries++;
+        if (activity == null) {
+            nativeLog("activity null");
+            return;
+        }
+        try {
+            View decor = activity.getWindow().getDecorView();
+            if (decor.getWindowToken() == null && tries < 50) {
+                nativeLog("window token null, retry " + tries);
+                decor.postDelayed(attachRetry, 200);
+                return;
+            }
+            attachNow();
+        } catch (Throwable t) {
+            nativeLog("tryAttach error: " + t);
+            if (tries < 50) ui.postDelayed(attachRetry, 300);
+            else {
+                try {
+                    Toast.makeText(activity, "AU FAIL: " + t.getMessage(), Toast.LENGTH_LONG).show();
+                } catch (Throwable ignored) {}
+            }
+        }
+    }
 
-        wm = activity.getWindowManager();
+    private static void attachNow() {
+        if (attached) return;
         Context ctx = activity;
+        wm = activity.getWindowManager();
 
-        // ESP fullscreen (not touchable)
+        // --- ESP layer (not touchable) ---
         espView = new EspView(ctx);
-        espLp = baseParams(
+        espLp = params(
                 WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT);
+                WindowManager.LayoutParams.MATCH_PARENT,
+                false);
         espLp.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
         espLp.gravity = Gravity.TOP | Gravity.START;
-        setToken(espLp);
         wm.addView(espView, espLp);
+        nativeLog("esp view added");
 
-        // FAB — big red button
+        // --- FAB ---
         fab = new Button(ctx);
         fab.setText("MENU");
         fab.setTextColor(Color.WHITE);
         fab.setTextSize(18f);
         fab.setAllCaps(true);
         fab.setBackgroundColor(0xF0E53935);
-        fabLp = baseParams(dp(ctx, 96), dp(ctx, 96));
+        fabLp = params(dp(96), dp(96), true);
         fabLp.gravity = Gravity.START | Gravity.CENTER_VERTICAL;
-        fabLp.x = dp(ctx, 16);
+        fabLp.x = dp(18);
         fabLp.y = 0;
-        setToken(fabLp);
         wm.addView(fab, fabLp);
+        nativeLog("fab added");
 
-        // Panel
+        // --- Panel ---
         panel = buildPanel(ctx);
-        panelLp = baseParams(dp(ctx, 320), WindowManager.LayoutParams.WRAP_CONTENT);
-        panelLp.gravity = Gravity.CENTER;
-        setToken(panelLp);
         panel.setVisibility(View.GONE);
+        panelLp = params(dp(320), WindowManager.LayoutParams.WRAP_CONTENT, true);
+        panelLp.gravity = Gravity.CENTER;
         wm.addView(panel, panelLp);
+        nativeLog("panel added");
 
         fab.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 menuOpen = !menuOpen;
                 panel.setVisibility(menuOpen ? View.VISIBLE : View.GONE);
                 fab.setText(menuOpen ? "CLOSE" : "MENU");
-                try {
-                    wm.updateViewLayout(panel, panelLp);
-                } catch (Throwable ignored) {}
+                try { wm.updateViewLayout(panel, panelLp); } catch (Throwable ignored) {}
             }
         });
 
         attached = true;
         ui.post(ticker);
-        Toast.makeText(activity, "AU CHEAT OK — tap MENU", Toast.LENGTH_LONG).show();
+        Toast.makeText(activity, "AU CHEAT OK — press MENU", Toast.LENGTH_LONG).show();
+        nativeLog("ATTACH OK type=" + fabLp.type);
     }
 
-    private static void setToken(WindowManager.LayoutParams lp) {
+    /** LGL activity style: TYPE_APPLICATION. Fallback overlay if permitted. */
+    private static WindowManager.LayoutParams params(int w, int h, boolean touchable) {
+        int type = WindowManager.LayoutParams.TYPE_APPLICATION;
         try {
-            View decor = activity.getWindow().getDecorView();
-            lp.token = decor.getWindowToken();
+            if (Build.VERSION.SDK_INT >= 23 &&
+                    Settings.canDrawOverlays(activity)) {
+                type = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
+            }
         } catch (Throwable ignored) {}
-    }
 
-    private static WindowManager.LayoutParams baseParams(int w, int h) {
+        int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS
+                | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED;
+        if (!touchable) {
+            flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        } else {
+            flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                    | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH;
+        }
+
         WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
-                w,
-                h,
-                WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
-                        | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
-                PixelFormat.TRANSLUCENT);
+                w, h, type, flags, PixelFormat.TRANSLUCENT);
         lp.format = PixelFormat.TRANSLUCENT;
+        lp.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_PAN;
         return lp;
     }
 
@@ -150,28 +192,28 @@ public class AuOverlay {
         ScrollView scroll = new ScrollView(ctx);
         LinearLayout box = new LinearLayout(ctx);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(ctx, 16), dp(ctx, 16), dp(ctx, 16), dp(ctx, 16));
+        box.setPadding(dp(16), dp(16), dp(16), dp(16));
         box.setBackgroundColor(0xF014141C);
 
         TextView title = new TextView(ctx);
-        title.setText("Among Us Internal\n2026.6.5");
+        title.setText("Among Us Internal\n2026.6.5  |  " + Build.VERSION.SDK_INT);
         title.setTextColor(Color.WHITE);
         title.setTextSize(16f);
         box.addView(title);
 
-        box.addView(chk(ctx, "Player ESP", nativeGetEsp(), new CompoundButton.OnCheckedChangeListener() {
+        box.addView(chk("Player ESP", nativeGetEsp(), new CompoundButton.OnCheckedChangeListener() {
             @Override public void onCheckedChanged(CompoundButton b, boolean c) { nativeSetEsp(c); }
         }));
-        box.addView(chk(ctx, "Murder ESP", nativeGetMurderEsp(), new CompoundButton.OnCheckedChangeListener() {
+        box.addView(chk("Murder ESP", nativeGetMurderEsp(), new CompoundButton.OnCheckedChangeListener() {
             @Override public void onCheckedChanged(CompoundButton b, boolean c) { nativeSetMurderEsp(c); }
         }));
-        box.addView(chk(ctx, "Boxes", true, new CompoundButton.OnCheckedChangeListener() {
+        box.addView(chk("Boxes", true, new CompoundButton.OnCheckedChangeListener() {
             @Override public void onCheckedChanged(CompoundButton b, boolean c) { nativeSetBox(c); }
         }));
-        box.addView(chk(ctx, "Snaplines", true, new CompoundButton.OnCheckedChangeListener() {
+        box.addView(chk("Snaplines", true, new CompoundButton.OnCheckedChangeListener() {
             @Override public void onCheckedChanged(CompoundButton b, boolean c) { nativeSetLine(c); }
         }));
-        box.addView(chk(ctx, "Names / Roles", true, new CompoundButton.OnCheckedChangeListener() {
+        box.addView(chk("Names / Roles", true, new CompoundButton.OnCheckedChangeListener() {
             @Override public void onCheckedChanged(CompoundButton b, boolean c) { nativeSetName(c); }
         }));
 
@@ -179,9 +221,8 @@ public class AuOverlay {
         return scroll;
     }
 
-    private static CheckBox chk(Context ctx, String text, boolean on,
-                                CompoundButton.OnCheckedChangeListener l) {
-        CheckBox c = new CheckBox(ctx);
+    private static CheckBox chk(String text, boolean on, CompoundButton.OnCheckedChangeListener l) {
+        CheckBox c = new CheckBox(activity);
         c.setText(text);
         c.setTextColor(Color.WHITE);
         c.setChecked(on);
@@ -189,8 +230,8 @@ public class AuOverlay {
         return c;
     }
 
-    private static int dp(Context ctx, int v) {
-        return Math.round(v * ctx.getResources().getDisplayMetrics().density);
+    private static int dp(int v) {
+        return Math.round(v * activity.getResources().getDisplayMetrics().density);
     }
 
     public static class EspView extends View {
@@ -213,11 +254,6 @@ public class AuOverlay {
         }
 
         @Override
-        public boolean onTouchEvent(MotionEvent event) {
-            return false;
-        }
-
-        @Override
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
             int n;
@@ -225,24 +261,15 @@ public class AuOverlay {
             if (n <= 0) return;
             if (n > 16) n = 16;
             try { nativeEspFill(buf); } catch (Throwable t) { return; }
-
             float midX = getWidth() * 0.5f;
             float baseY = getHeight() * 0.85f;
             for (int i = 0; i < n; i++) {
                 int o = i * 8;
-                float sx = buf[o];
-                float top = buf[o + 1];
-                float bot = buf[o + 2];
-                int col = Color.argb(
-                        clamp255(buf[o + 6] * 255f),
-                        clamp255(buf[o + 3] * 255f),
-                        clamp255(buf[o + 4] * 255f),
-                        clamp255(buf[o + 5] * 255f));
-                float flags = buf[o + 7];
-                if (flags < 0.5f) continue;
-
+                float sx = buf[o], top = buf[o + 1], bot = buf[o + 2];
+                int col = Color.argb(c(buf[o + 6]), c(buf[o + 3]), c(buf[o + 4]), c(buf[o + 5]));
+                if (buf[o + 7] < 0.5f) continue;
                 paint.setStyle(Paint.Style.STROKE);
-                paint.setStrokeWidth(flags > 1.5f ? 7f : 4f);
+                paint.setStrokeWidth(buf[o + 7] > 1.5f ? 7f : 4f);
                 paint.setColor(col);
                 float hw = Math.max(20f, (bot - top) * 0.35f);
                 canvas.drawRect(sx - hw, top, sx + hw, bot, paint);
@@ -258,9 +285,10 @@ public class AuOverlay {
             }
         }
 
-        private static int clamp255(float v) {
-            if (v < 0f) return 0;
-            if (v > 255f) return 255;
+        private static int c(float v) {
+            v *= 255f;
+            if (v < 0) return 0;
+            if (v > 255) return 255;
             return (int) v;
         }
     }

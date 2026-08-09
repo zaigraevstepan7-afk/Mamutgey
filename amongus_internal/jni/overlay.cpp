@@ -194,6 +194,14 @@ static void J_nativeSetName(JNIEnv*, jclass, jboolean v) { g_Cheat.espName = v; 
 static jboolean J_nativeGetEsp(JNIEnv*, jclass) { return g_Cheat.espEnabled; }
 static jboolean J_nativeGetMurderEsp(JNIEnv*, jclass) { return g_Cheat.murderEspEnabled; }
 static void J_nativeSetViewSize(JNIEnv*, jclass, jint w, jint h) { g_ViewW = w; g_ViewH = h; }
+static void J_nativeLog(JNIEnv* env, jclass, jstring msg) {
+    if (!msg) return;
+    const char* c = env->GetStringUTFChars(msg, nullptr);
+    if (c) {
+        OLOGI("[java] %s", c);
+        env->ReleaseStringUTFChars(msg, c);
+    }
+}
 
 static JNINativeMethod g_Methods[] = {
     {const_cast<char*>("nativeEspCount"), const_cast<char*>("()I"), (void*)J_nativeEspCount},
@@ -207,6 +215,7 @@ static JNINativeMethod g_Methods[] = {
     {const_cast<char*>("nativeGetEsp"), const_cast<char*>("()Z"), (void*)J_nativeGetEsp},
     {const_cast<char*>("nativeGetMurderEsp"), const_cast<char*>("()Z"), (void*)J_nativeGetMurderEsp},
     {const_cast<char*>("nativeSetViewSize"), const_cast<char*>("(II)V"), (void*)J_nativeSetViewSize},
+    {const_cast<char*>("nativeLog"), const_cast<char*>("(Ljava/lang/String;)V"), (void*)J_nativeLog},
 };
 
 static jclass LoadOverlayClass(JNIEnv* env, jobject appCl) {
@@ -265,6 +274,8 @@ bool Overlay_Start(JavaVM* vm) {
         OLOGE("Overlay_Start: AttachCurrentThread failed");
         return false;
     }
+
+    OLOGI("BUILD=20260809d package=com.innersloth.spacemafia (CONFIRMED)");
 
     jobject appCl = GetAppClassLoader(env);
     if (!appCl) return false;
