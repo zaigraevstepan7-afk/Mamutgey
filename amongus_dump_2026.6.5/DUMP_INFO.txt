@@ -1,0 +1,11 @@
+Among Us Android dump
+Version: 2026.6.5 (versionCode 7045)
+Package: com.innersloth.spacemafia
+Source: APKPure XAPK
+URL: https://d.apkpure.net/b/XAPK/com.innersloth.spacemafia?version=latest
+Filename: Among+Us_2026.6.5_APKPure.xapk
+Unity: 2022.3.62f3
+Metadata: v31
+ABI: arm64-v8a
+Dumper: Il2CppDumper 6.7.46
+Note: libil2cpp reported "may be protected" but CodeRegistration found and dump completed.
