@@ -19,10 +19,9 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.view.animation.DecelerateInterpolator;
-import android.view.animation.OvershootInterpolator;
 
 /**
- * Among Us internal overlay — white bottom strip opens a polished sheet menu.
+ * Compact floating menu + small white bottom handle. Menu is draggable.
  */
 public class AuOverlay {
     private static Activity activity;
@@ -86,9 +85,7 @@ public class AuOverlay {
     }
 
     private static class StartUi implements Runnable {
-        public void run() {
-            tryAttach();
-        }
+        public void run() { tryAttach(); }
     }
 
     private static void tryAttach() {
@@ -117,11 +114,29 @@ public class AuOverlay {
         setMenuOpen(!menuOpen);
     }
 
+    static void moveSheet(int dx, int dy) {
+        if (sheetLp == null || wm == null || sheet == null) return;
+        sheetLp.x += dx;
+        sheetLp.y += dy;
+        // keep mostly on-screen
+        int sw = activity.getResources().getDisplayMetrics().widthPixels;
+        int sh = activity.getResources().getDisplayMetrics().heightPixels;
+        int maxX = Math.max(0, sw - sheetLp.width);
+        int maxY = Math.max(0, sh - sheetLp.height);
+        if (sheetLp.x < 0) sheetLp.x = 0;
+        if (sheetLp.y < 0) sheetLp.y = 0;
+        if (sheetLp.x > maxX) sheetLp.x = maxX;
+        if (sheetLp.y > maxY) sheetLp.y = maxY;
+        try { wm.updateViewLayout(sheet, sheetLp); } catch (Throwable ignored) {}
+    }
+
     private static void attachNow() {
         if (attached) return;
         try {
             Context ctx = activity;
             wm = activity.getWindowManager();
+            int sw = activity.getResources().getDisplayMetrics().widthPixels;
+            int sh = activity.getResources().getDisplayMetrics().heightPixels;
 
             espView = new EspView(ctx);
             espLp = params(WindowManager.LayoutParams.MATCH_PARENT,
@@ -130,24 +145,29 @@ public class AuOverlay {
             espLp.gravity = Gravity.TOP | Gravity.START;
             wm.addView(espView, espLp);
 
+            // Compact floating panel (not full-width sheet)
+            int panelW = dp(268);
+            int panelH = dp(318);
             sheet = new MenuSheet(ctx);
-            int sheetH = Math.round(activity.getResources().getDisplayMetrics().heightPixels * 0.58f);
-            sheetLp = params(WindowManager.LayoutParams.MATCH_PARENT, sheetH, true);
-            sheetLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+            sheetLp = params(panelW, panelH, true);
+            sheetLp.gravity = Gravity.TOP | Gravity.START;
+            sheetLp.x = Math.max(0, (sw - panelW) / 2);
+            sheetLp.y = Math.max(0, (sh - panelH) / 2 - dp(20));
             sheet.setVisibility(View.GONE);
             sheet.setAlpha(0f);
             wm.addView(sheet, sheetLp);
 
+            // Small white handle — short bar at bottom center
             handle = new HandleView(ctx);
-            handleLp = params(WindowManager.LayoutParams.MATCH_PARENT, dp(40), true);
+            handleLp = params(dp(72), dp(22), true);
             handleLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+            handleLp.y = dp(8);
             wm.addView(handle, handleLp);
             handle.setOnClickListener(new HandleClick());
 
             attached = true;
             ui.post(ticker);
         } catch (Throwable t) {
-            // Silent retry — never toast / never announce inject
             attached = false;
             espView = null;
             sheet = null;
@@ -167,9 +187,7 @@ public class AuOverlay {
     }
 
     private static WindowManager.LayoutParams params(int w, int h, boolean touchable) {
-        // Always TYPE_APPLICATION via Activity WindowManager — OVERLAY needs permission and crashes inject.
         int type = WindowManager.LayoutParams.TYPE_APPLICATION;
-
         int flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
                 | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                 | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED;
@@ -190,12 +208,10 @@ public class AuOverlay {
         return v * activity.getResources().getDisplayMetrics().density;
     }
 
-    // ---------------- BOTTOM WHITE HANDLE ----------------
+    // ---------------- SMALL WHITE HANDLE ----------------
     public static class HandleView extends View {
         private final Paint bar = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint glow = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint hint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final RectF r = new RectF();
         private boolean expanded;
         private final long t0 = System.nanoTime();
@@ -205,14 +221,6 @@ public class AuOverlay {
             setClickable(true);
             bar.setStyle(Paint.Style.FILL);
             glow.setStyle(Paint.Style.FILL);
-            edge.setStyle(Paint.Style.STROKE);
-            edge.setStrokeWidth(dpf(1));
-            edge.setColor(0x66FFFFFF);
-            hint.setColor(0xAA1A1A1A);
-            hint.setTextAlign(Paint.Align.CENTER);
-            hint.setTextSize(dpf(10));
-            hint.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
-            if (Build.VERSION.SDK_INT >= 21) hint.setLetterSpacing(0.12f);
         }
 
         void setExpanded(boolean v) {
@@ -223,39 +231,26 @@ public class AuOverlay {
         @Override protected void onDraw(Canvas c) {
             float w = getWidth(), h = getHeight();
             float age = (System.nanoTime() - t0) / 1e9f;
-            float pulse = 0.5f + 0.5f * (float) Math.sin(age * 2.2);
+            float pulse = 0.5f + 0.5f * (float) Math.sin(age * 2.4);
 
-            // Full-width soft white strip along the bottom edge
-            float stripH = dpf(expanded ? 3.5f : 5f);
-            float stripY = h - dpf(10) - stripH;
-            r.set(dpf(28), stripY, w - dpf(28), stripY + stripH);
+            float barW = expanded ? dpf(28) : dpf(40);
+            float barH = dpf(3.5f);
+            float cx = w * 0.5f;
+            float cy = h * 0.5f;
+            r.set(cx - barW * 0.5f, cy - barH * 0.5f, cx + barW * 0.5f, cy + barH * 0.5f);
 
             if (!expanded) {
-                glow.setShader(new LinearGradient(0, stripY - dpf(10), 0, h,
-                        Color.TRANSPARENT,
-                        Color.argb((int) (50 + 35 * pulse), 255, 255, 255),
-                        Shader.TileMode.CLAMP));
-                c.drawRect(0, stripY - dpf(14), w, h, glow);
+                glow.setColor(Color.argb((int) (40 + 30 * pulse), 255, 255, 255));
+                c.drawCircle(cx, cy, dpf(10), glow);
             }
 
-            bar.setColor(0xFFF7F8FA);
-            bar.setAlpha(expanded ? 180 : 255);
-            c.drawRoundRect(r, stripH, stripH, bar);
-            c.drawRoundRect(r, stripH, stripH, edge);
-
-            // Center grip nub
-            float nubW = expanded ? w * 0.14f : w * 0.20f;
-            float nubH = dpf(expanded ? 4f : 5.5f);
-            float cx = w * 0.5f;
-            float cy = stripY + stripH * 0.5f;
-            RectF nub = new RectF(cx - nubW * 0.5f, cy - nubH * 0.5f,
-                    cx + nubW * 0.5f, cy + nubH * 0.5f);
-            bar.setColor(0xFFFFFFFF);
-            c.drawRoundRect(nub, nubH, nubH, bar);
+            bar.setColor(0xFFF5F7FA);
+            bar.setAlpha(expanded ? 160 : 235);
+            c.drawRoundRect(r, barH, barH, bar);
         }
     }
 
-    // ---------------- MENU SHEET ----------------
+    // ---------------- COMPACT DRAGGABLE MENU ----------------
     public static class MenuSheet extends View {
         private final Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint accent = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -283,41 +278,44 @@ public class AuOverlay {
                 "Player ESP", "Murder ESP", "Boxes", "Snaplines", "Names / Roles"
         };
         private final String[] hints = {
-                "crew outlines", "impostor highlight", "corner brackets", "bottom snaplines", "tags + distance"
+                "crew", "impostors", "brackets", "lines", "tags"
         };
         private final boolean[] values = new boolean[5];
 
         private boolean closing;
+        private boolean dragging;
+        private float lastRawX, lastRawY;
+        private float downX, downY;
+        private boolean moved;
 
         public MenuSheet(Context ctx) {
             super(ctx);
             setClickable(true);
 
             brand.setColor(C_ICE);
-            brand.setTextSize(dpf(28));
+            brand.setTextSize(dpf(18));
             brand.setTypeface(Typeface.create("sans-serif-black", Typeface.NORMAL));
-            if (Build.VERSION.SDK_INT >= 21) brand.setLetterSpacing(-0.02f);
 
             brandSub.setColor(C_CRIMSON_S);
-            brandSub.setTextSize(dpf(12));
+            brandSub.setTextSize(dpf(9));
             brandSub.setTypeface(Typeface.create("sans-serif-medium", Typeface.BOLD));
-            if (Build.VERSION.SDK_INT >= 21) brandSub.setLetterSpacing(0.28f);
+            if (Build.VERSION.SDK_INT >= 21) brandSub.setLetterSpacing(0.22f);
 
             meta.setColor(C_MUTED);
-            meta.setTextSize(dpf(11));
+            meta.setTextSize(dpf(9));
 
             rowLabel.setColor(C_ICE);
-            rowLabel.setTextSize(dpf(15.5f));
+            rowLabel.setTextSize(dpf(13));
             rowLabel.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
 
             rowHint.setColor(0xFF6B7588);
-            rowHint.setTextSize(dpf(11));
+            rowHint.setTextSize(dpf(9));
 
             divider.setColor(C_LINE);
             divider.setStrokeWidth(1f);
 
             chipTx.setColor(C_ICE);
-            chipTx.setTextSize(dpf(12));
+            chipTx.setTextSize(dpf(10));
             chipTx.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
             chipTx.setTextAlign(Paint.Align.CENTER);
 
@@ -325,9 +323,9 @@ public class AuOverlay {
             chipStroke.setStrokeWidth(dpf(1));
 
             thumbSh.setColor(0x44000000);
-            grip.setColor(0x66FFFFFF);
+            grip.setColor(0x88FFFFFF);
             accent.setStrokeCap(Paint.Cap.ROUND);
-            accent.setStrokeWidth(dpf(2.5f));
+            accent.setStrokeWidth(dpf(2));
 
             syncFromNative();
             for (int i = 0; i < 5; i++) {
@@ -348,26 +346,21 @@ public class AuOverlay {
             closing = !open;
             if (open) {
                 setVisibility(VISIBLE);
-                float h = getHeight();
-                if (h <= 0) h = dpf(420);
-                setTranslationY(h * 0.22f);
+                setScaleX(0.92f);
+                setScaleY(0.92f);
                 setAlpha(0f);
                 animate()
-                        .translationY(0f)
-                        .alpha(1f)
-                        .setDuration(340)
-                        .setInterpolator(new OvershootInterpolator(0.8f))
-                        .start();
-            } else {
-                float h = getHeight();
-                if (h <= 0) h = dpf(420);
-                animate()
-                        .translationY(h * 0.2f)
-                        .alpha(0f)
-                        .setDuration(220)
+                        .scaleX(1f).scaleY(1f).alpha(1f)
+                        .setDuration(200)
                         .setInterpolator(new DecelerateInterpolator())
                         .start();
-                ui.postDelayed(new HideSheet(), 230);
+            } else {
+                animate()
+                        .scaleX(0.94f).scaleY(0.94f).alpha(0f)
+                        .setDuration(160)
+                        .setInterpolator(new DecelerateInterpolator())
+                        .start();
+                ui.postDelayed(new HideSheet(), 170);
             }
         }
 
@@ -375,6 +368,8 @@ public class AuOverlay {
             if (closing) {
                 setVisibility(GONE);
                 setAlpha(0f);
+                setScaleX(1f);
+                setScaleY(1f);
             }
         }
 
@@ -409,64 +404,59 @@ public class AuOverlay {
             }
         }
 
+        private float headerH() { return dpf(58); }
+        private float rowStart() { return dpf(66); }
+        private float rowH() { return dpf(40); }
+
         @Override protected void onDraw(Canvas c) {
             tickThumbs();
             float w = getWidth(), h = getHeight();
             if (w <= 0 || h <= 0) return;
-            float rad = dpf(28);
+            float rad = dpf(18);
 
-            // Round panel without clipPath (clipPath crashes on some GPUs / software canvas)
             tmp.set(0, 0, w, h);
             bg.setShader(new LinearGradient(0, 0, 0, h, C_PANEL2, C_PANEL, Shader.TileMode.CLAMP));
             c.drawRoundRect(tmp, rad, rad, bg);
 
-            wash.setShader(new RadialGradient(w * 0.85f, dpf(-20), w * 0.75f,
-                    0x55E11D48, Color.TRANSPARENT, Shader.TileMode.CLAMP));
-            c.drawRoundRect(tmp, rad, rad, wash);
-            wash.setShader(new RadialGradient(w * 0.12f, h * 0.92f, w * 0.55f,
-                    0x221E3A5F, Color.TRANSPARENT, Shader.TileMode.CLAMP));
+            wash.setShader(new RadialGradient(w * 0.9f, dpf(-10), w * 0.7f,
+                    0x44E11D48, Color.TRANSPARENT, Shader.TileMode.CLAMP));
             c.drawRoundRect(tmp, rad, rad, wash);
 
             accent.setStyle(Paint.Style.FILL);
             accent.setShader(new LinearGradient(0, 0, w, 0,
                     0x00FF4D6D, 0xFFE11D48, Shader.TileMode.CLAMP));
-            c.drawRect(rad, 0, w - rad, dpf(3), accent);
+            c.drawRect(rad, 0, w - rad, dpf(2.5f), accent);
             accent.setShader(null);
 
-            float gw = dpf(42), gh = dpf(4);
-            tmp.set(w * 0.5f - gw * 0.5f, dpf(12), w * 0.5f + gw * 0.5f, dpf(12) + gh);
+            // drag grip
+            float gw = dpf(28), gh = dpf(3);
+            tmp.set(w * 0.5f - gw * 0.5f, dpf(8), w * 0.5f + gw * 0.5f, dpf(8) + gh);
             c.drawRoundRect(tmp, gh, gh, grip);
 
-            float bx = dpf(24);
-            float by = dpf(48);
-            c.drawText("AMONG US", bx, by + dpf(8), brand);
-            c.drawText("INTERNAL", bx, by + dpf(28), brandSub);
-            c.drawText("2026.6.5  ·  arm64  ·  Kitty", bx, by + dpf(48), meta);
+            float bx = dpf(14);
+            c.drawText("AMONG US", bx, dpf(32), brand);
+            float brandW = brand.measureText("AMONG US ");
+            c.drawText("INTERNAL", bx + brandW, dpf(32), brandSub);
+            c.drawText("2026.6.5 · Kitty", bx, dpf(46), meta);
 
-            accent.setStyle(Paint.Style.STROKE);
-            accent.setColor(C_CRIMSON);
-            float slashY = by + dpf(58);
-            c.drawLine(bx, slashY, bx + dpf(36), slashY, accent);
-            accent.setStyle(Paint.Style.FILL);
-
-            float y = by + dpf(78);
-            float rowH = dpf(56);
-            float padX = dpf(20);
+            float y = rowStart();
+            float rh = rowH();
+            float padX = dpf(12);
 
             for (int i = 0; i < labels.length; i++) {
                 float t = thumbNow[i];
                 if (t > 0.01f) {
-                    rowWash.setColor(Color.argb((int) (28 * t), 225, 29, 72));
-                    tmp.set(padX - dpf(4), y, w - padX + dpf(4), y + rowH);
-                    c.drawRoundRect(tmp, dpf(14), dpf(14), rowWash);
+                    rowWash.setColor(Color.argb((int) (24 * t), 225, 29, 72));
+                    tmp.set(padX - dpf(2), y, w - padX + dpf(2), y + rh);
+                    c.drawRoundRect(tmp, dpf(10), dpf(10), rowWash);
                 }
-                c.drawText(labels[i], padX, y + dpf(24), rowLabel);
-                c.drawText(hints[i], padX, y + dpf(42), rowHint);
-                drawSwitch(c, w - padX, y + rowH * 0.5f, t);
+                c.drawText(labels[i], padX, y + dpf(17), rowLabel);
+                c.drawText(hints[i], padX, y + dpf(30), rowHint);
+                drawSwitch(c, w - padX, y + rh * 0.5f, t);
                 if (i < labels.length - 1) {
-                    c.drawLine(padX, y + rowH, w - padX, y + rowH, divider);
+                    c.drawLine(padX, y + rh, w - padX, y + rh, divider);
                 }
-                y += rowH;
+                y += rh;
             }
 
             int pc = 0, mc = 0;
@@ -474,25 +464,25 @@ public class AuOverlay {
                 pc = nativePlayerCount();
                 mc = nativeMurderCount();
             } catch (Throwable ignored) {}
-            float chipY = h - dpf(36);
-            drawChip(c, dpf(24), chipY, "PLAYERS  " + pc, false);
-            drawChip(c, dpf(24) + dpf(118), chipY, "MURDER  " + mc, mc > 0);
+            float chipY = h - dpf(22);
+            drawChip(c, dpf(12), chipY, "P " + pc, false);
+            drawChip(c, dpf(12) + dpf(58), chipY, "M " + mc, mc > 0);
         }
 
         private void drawChip(Canvas c, float x, float cy, String text, boolean hot) {
             float tw = chipTx.measureText(text);
-            float ph = dpf(28), pw = tw + dpf(28);
+            float ph = dpf(20), pw = tw + dpf(16);
             tmp.set(x, cy - ph * 0.5f, x + pw, cy + ph * 0.5f);
             chipBg.setColor(hot ? 0x33E11D48 : 0x18FFFFFF);
-            c.drawRoundRect(tmp, dpf(10), dpf(10), chipBg);
+            c.drawRoundRect(tmp, dpf(8), dpf(8), chipBg);
             chipStroke.setColor(hot ? 0x88E11D48 : 0x22FFFFFF);
-            c.drawRoundRect(tmp, dpf(10), dpf(10), chipStroke);
+            c.drawRoundRect(tmp, dpf(8), dpf(8), chipStroke);
             chipTx.setColor(hot ? C_CRIMSON_S : C_ICE);
-            c.drawText(text, x + pw * 0.5f, cy + dpf(4.5f), chipTx);
+            c.drawText(text, x + pw * 0.5f, cy + dpf(3.5f), chipTx);
         }
 
         private void drawSwitch(Canvas c, float right, float cy, float t) {
-            float tw = dpf(50), th = dpf(28);
+            float tw = dpf(40), th = dpf(22);
             float left = right - tw;
             tmp.set(left, cy - th * 0.5f, right, cy + th * 0.5f);
             int r = (int) (26 + (225 - 26) * t);
@@ -500,25 +490,59 @@ public class AuOverlay {
             int b = (int) (48 + (72 - 48) * t);
             track.setColor(Color.rgb(r, g, b));
             c.drawRoundRect(tmp, th, th, track);
-            float thumbR = th * 0.36f;
+            float thumbR = th * 0.34f;
             float tx = left + th * 0.5f + (tw - th) * t;
-            c.drawCircle(tx, cy + dpf(1), thumbR, thumbSh);
+            c.drawCircle(tx, cy + dpf(0.8f), thumbR, thumbSh);
             thumb.setColor(0xFFFAFBFD);
             c.drawCircle(tx, cy, thumbR, thumb);
         }
 
         @Override public boolean onTouchEvent(MotionEvent e) {
-            if (e.getAction() != MotionEvent.ACTION_UP) return true;
-            float y0 = dpf(48) + dpf(78);
-            float rowH = dpf(56);
-            for (int i = 0; i < labels.length; i++) {
-                float top = y0 + i * rowH;
-                if (e.getY() >= top && e.getY() <= top + rowH) {
-                    apply(i, !values[i]);
+            switch (e.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    lastRawX = e.getRawX();
+                    lastRawY = e.getRawY();
+                    downX = e.getX();
+                    downY = e.getY();
+                    moved = false;
+                    // drag from header / grip zone, or anywhere with long press feel — header preferred
+                    dragging = downY <= headerH() + dpf(8);
                     return true;
-                }
+
+                case MotionEvent.ACTION_MOVE:
+                    float dx = e.getRawX() - lastRawX;
+                    float dy = e.getRawY() - lastRawY;
+                    if (!dragging) {
+                        // allow drag from anywhere if finger moved enough (hold-drag)
+                        if (Math.abs(e.getX() - downX) + Math.abs(e.getY() - downY) > dpf(10)) {
+                            dragging = true;
+                        }
+                    }
+                    if (dragging && (Math.abs(dx) > 0.5f || Math.abs(dy) > 0.5f)) {
+                        moved = true;
+                        moveSheet(Math.round(dx), Math.round(dy));
+                        lastRawX = e.getRawX();
+                        lastRawY = e.getRawY();
+                    }
+                    return true;
+
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    if (!moved) {
+                        float y0 = rowStart();
+                        float rh = rowH();
+                        for (int i = 0; i < labels.length; i++) {
+                            float top = y0 + i * rh;
+                            if (e.getY() >= top && e.getY() <= top + rh) {
+                                apply(i, !values[i]);
+                                dragging = false;
+                                return true;
+                            }
+                        }
+                    }
+                    dragging = false;
+                    return true;
             }
-            if (e.getY() < dpf(40)) setMenuOpen(false);
             return true;
         }
     }

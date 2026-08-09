@@ -333,7 +333,7 @@ bool Overlay_Start(JavaVM* vm) {
 
     if (g_Alive.load()) return true;
 
-    OLOGI("BUILD=20260809h crashfix");
+    OLOGI("BUILD=20260809i compact-drag");
 
     jobject appCl = GetAppClassLoader(env);
     if (!appCl) return false;
