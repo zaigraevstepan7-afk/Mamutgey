@@ -23,8 +23,24 @@ constexpr uintptr_t PC_AllPlayerControls  = 0x8;
 constexpr uintptr_t PC_PlayerId           = 0x35;
 constexpr uintptr_t PC_CachedPlayerData   = 0x70;
 constexpr uintptr_t PC_inVent             = 0x60;
+constexpr uintptr_t PC_killTimer          = 0xB0;
+constexpr uintptr_t PC_Collider           = 0xC8; // Collider2D*
+constexpr uintptr_t PC_MyPhysics          = 0xD0; // PlayerPhysics*
+constexpr uintptr_t PC_NetTransform       = 0xD8;
 constexpr uintptr_t PC_isDummy            = 0x110;
 constexpr uintptr_t PC_notRealPlayer      = 0x111;
+constexpr uintptr_t PC_rigidbody2D        = 0x140;
+
+// PlayerPhysics
+constexpr uintptr_t PP_body               = 0x60; // Rigidbody2D*
+constexpr uintptr_t PP_Speed              = 0x50;
+
+// Methods
+constexpr uintptr_t PlayerControl_RpcSetRole            = 0x21C1CEC;
+constexpr uintptr_t PlayerControl_SetKinematic          = 0x21BA608;
+constexpr uintptr_t RoleManager_SetRole                 = 0x21FD3F0;
+constexpr uintptr_t Behaviour_set_enabled               = 0x44485C8;
+constexpr uintptr_t Rigidbody2D_set_simulated           = 0x449C648;
 
 // NetworkedPlayerInfo instance
 constexpr uintptr_t NPI_PlayerId          = 0x35;

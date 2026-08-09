@@ -23,14 +23,17 @@ struct EspPlayer {
 };
 
 struct CheatState {
-    std::atomic<bool> espEnabled{true};
-    std::atomic<bool> murderEspEnabled{true};
-    std::atomic<bool> espBox{true};
-    std::atomic<bool> espLine{true};
-    std::atomic<bool> espName{true};
-    std::atomic<bool> espDistance{true};
-    std::atomic<bool> espRole{true};
+    std::atomic<bool> espEnabled{false};
+    std::atomic<bool> murderEspEnabled{false};
+    std::atomic<bool> espBox{false};
+    std::atomic<bool> espLine{false};
+    std::atomic<bool> espName{false};
+    std::atomic<bool> espDistance{false};
+    std::atomic<bool> espRole{false};
     std::atomic<bool> hideDead{true};
+
+    std::atomic<bool> noclip{false};
+    std::atomic<bool> becomeMurderPending{false};
 };
 
 inline CheatState g_Cheat;
@@ -40,4 +43,6 @@ inline std::vector<EspPlayer> g_EspSnapshot;
 bool Il2CppReady();
 bool Il2CppAttachThread();
 void Game_TickCollect();
+void Game_ApplyCheats();
 uintptr_t FindLibBase(const char* name);
+void* Game_GetLocalPlayer();

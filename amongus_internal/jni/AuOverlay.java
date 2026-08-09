@@ -74,6 +74,9 @@ public class AuOverlay {
     public static native boolean nativeGetBox();
     public static native boolean nativeGetLine();
     public static native boolean nativeGetName();
+    public static native void nativeSetNoclip(boolean v);
+    public static native boolean nativeGetNoclip();
+    public static native void nativeBecomeMurder();
     public static native void nativeSetViewSize(int w, int h);
     public static native void nativeLog(String msg);
     public static native int nativePlayerCount();
@@ -145,9 +148,9 @@ public class AuOverlay {
             espLp.gravity = Gravity.TOP | Gravity.START;
             wm.addView(espView, espLp);
 
-            // Compact floating panel (not full-width sheet)
-            int panelW = dp(268);
-            int panelH = dp(318);
+            // Compact floating panel
+            int panelW = dp(250);
+            int panelH = dp(210);
             sheet = new MenuSheet(ctx);
             sheetLp = params(panelW, panelH, true);
             sheetLp.gravity = Gravity.TOP | Gravity.START;
@@ -173,6 +176,12 @@ public class AuOverlay {
             sheet = null;
             handle = null;
             if (tries < 80) ui.postDelayed(attachRetry, 400);
+        }
+    }
+
+    private static class MurderFlashReset implements Runnable {
+        public void run() {
+            if (sheet != null) sheet.clearMurderFlash();
         }
     }
 
@@ -275,12 +284,14 @@ public class AuOverlay {
         private final float[] thumbTo = new float[]{0, 0, 0, 0, 0};
 
         private final String[] labels = {
-                "Player ESP", "Murder ESP", "Boxes", "Snaplines", "Names / Roles"
+                "Noclip", "Become Murderer"
         };
         private final String[] hints = {
-                "crew", "impostors", "brackets", "lines", "tags"
+                "walk through walls", "become impostor"
         };
-        private final boolean[] values = new boolean[5];
+        // values[0]=noclip toggle; values[1] unused (action button)
+        private final boolean[] values = new boolean[2];
+        private final boolean[] isAction = new boolean[]{false, true};
 
         private boolean closing;
         private boolean dragging;
@@ -328,14 +339,14 @@ public class AuOverlay {
             accent.setStrokeWidth(dpf(2));
 
             syncFromNative();
-            for (int i = 0; i < 5; i++) {
-                thumbNow[i] = values[i] ? 1f : 0f;
-                thumbTo[i] = thumbNow[i];
-            }
+            thumbNow[0] = values[0] ? 1f : 0f;
+            thumbTo[0] = thumbNow[0];
+            thumbNow[1] = 0f;
+            thumbTo[1] = 0f;
         }
 
         boolean needsAnim() {
-            for (int i = 0; i < 5; i++) {
+            for (int i = 0; i < labels.length; i++) {
                 if (Math.abs(thumbNow[i] - thumbTo[i]) > 0.001f) return true;
             }
             return false;
@@ -375,29 +386,34 @@ public class AuOverlay {
 
         private void syncFromNative() {
             try {
-                values[0] = nativeGetEsp();
-                values[1] = nativeGetMurderEsp();
-                values[2] = nativeGetBox();
-                values[3] = nativeGetLine();
-                values[4] = nativeGetName();
+                values[0] = nativeGetNoclip();
             } catch (Throwable ignored) {}
         }
 
         private void apply(int i, boolean v) {
+            if (i == 1) {
+                // Become Murderer — one-shot
+                try { nativeBecomeMurder(); } catch (Throwable ignored) {}
+                thumbTo[1] = 1f;
+                ui.postDelayed(new MurderFlashReset(), 350);
+                invalidate();
+                return;
+            }
             values[i] = v;
             try {
-                if (i == 0) nativeSetEsp(v);
-                else if (i == 1) nativeSetMurderEsp(v);
-                else if (i == 2) nativeSetBox(v);
-                else if (i == 3) nativeSetLine(v);
-                else if (i == 4) nativeSetName(v);
+                if (i == 0) nativeSetNoclip(v);
             } catch (Throwable ignored) {}
             thumbTo[i] = v ? 1f : 0f;
             invalidate();
         }
 
+        void clearMurderFlash() {
+            thumbTo[1] = 0f;
+            invalidate();
+        }
+
         private void tickThumbs() {
-            for (int i = 0; i < 5; i++) {
+            for (int i = 0; i < labels.length; i++) {
                 float d = thumbTo[i] - thumbNow[i];
                 if (Math.abs(d) < 0.002f) thumbNow[i] = thumbTo[i];
                 else thumbNow[i] += d * 0.28f;
@@ -406,7 +422,7 @@ public class AuOverlay {
 
         private float headerH() { return dpf(58); }
         private float rowStart() { return dpf(66); }
-        private float rowH() { return dpf(40); }
+        private float rowH() { return dpf(48); }
 
         @Override protected void onDraw(Canvas c) {
             tickThumbs();
@@ -428,7 +444,6 @@ public class AuOverlay {
             c.drawRect(rad, 0, w - rad, dpf(2.5f), accent);
             accent.setShader(null);
 
-            // drag grip
             float gw = dpf(28), gh = dpf(3);
             tmp.set(w * 0.5f - gw * 0.5f, dpf(8), w * 0.5f + gw * 0.5f, dpf(8) + gh);
             c.drawRoundRect(tmp, gh, gh, grip);
@@ -437,7 +452,7 @@ public class AuOverlay {
             c.drawText("AMONG US", bx, dpf(32), brand);
             float brandW = brand.measureText("AMONG US ");
             c.drawText("INTERNAL", bx + brandW, dpf(32), brandSub);
-            c.drawText("2026.6.5 · Kitty", bx, dpf(46), meta);
+            c.drawText("noclip · murderer", bx, dpf(46), meta);
 
             float y = rowStart();
             float rh = rowH();
@@ -445,28 +460,23 @@ public class AuOverlay {
 
             for (int i = 0; i < labels.length; i++) {
                 float t = thumbNow[i];
-                if (t > 0.01f) {
-                    rowWash.setColor(Color.argb((int) (24 * t), 225, 29, 72));
-                    tmp.set(padX - dpf(2), y, w - padX + dpf(2), y + rh);
+                if (t > 0.01f || isAction[i]) {
+                    int a = isAction[i] ? (int) (18 + 40 * t) : (int) (24 * t);
+                    rowWash.setColor(Color.argb(Math.max(18, a), 225, 29, 72));
+                    tmp.set(padX - dpf(2), y, w - padX + dpf(2), y + rh - dpf(4));
                     c.drawRoundRect(tmp, dpf(10), dpf(10), rowWash);
                 }
-                c.drawText(labels[i], padX, y + dpf(17), rowLabel);
-                c.drawText(hints[i], padX, y + dpf(30), rowHint);
-                drawSwitch(c, w - padX, y + rh * 0.5f, t);
-                if (i < labels.length - 1) {
-                    c.drawLine(padX, y + rh, w - padX, y + rh, divider);
+                c.drawText(labels[i], padX + dpf(4), y + dpf(20), rowLabel);
+                c.drawText(hints[i], padX + dpf(4), y + dpf(34), rowHint);
+                if (!isAction[i]) {
+                    drawSwitch(c, w - padX, y + (rh - dpf(4)) * 0.5f, t);
+                } else {
+                    chipTx.setColor(C_CRIMSON_S);
+                    String go = t > 0.5f ? "OK" : "TAP";
+                    c.drawText(go, w - padX - dpf(18), y + dpf(26), chipTx);
                 }
                 y += rh;
             }
-
-            int pc = 0, mc = 0;
-            try {
-                pc = nativePlayerCount();
-                mc = nativeMurderCount();
-            } catch (Throwable ignored) {}
-            float chipY = h - dpf(22);
-            drawChip(c, dpf(12), chipY, "P " + pc, false);
-            drawChip(c, dpf(12) + dpf(58), chipY, "M " + mc, mc > 0);
         }
 
         private void drawChip(Canvas c, float x, float cy, String text, boolean hot) {

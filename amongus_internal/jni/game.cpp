@@ -100,6 +100,84 @@ static void* GetLocalPlayer() {
     return *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(sf) + PC_LocalPlayer);
 }
 
+void* Game_GetLocalPlayer() { return GetLocalPlayer(); }
+
+static void SetBehaviourEnabled(void* behaviour, bool enabled) {
+    if (!behaviour || !IsUnityAlive(behaviour)) return;
+    using Fn = void (*)(void*, bool, const void*);
+    AsPtr<Fn>(Behaviour_set_enabled)(behaviour, enabled, nullptr);
+}
+
+static void* GetRoleManager() {
+    void* ti = GetTypeInfo(RoleManager_TypeInfo);
+    if (!ti) return nullptr;
+    void* sf = GetStaticFields(ti);
+    if (!sf) return nullptr;
+    // DestroyableSingleton<T>._instance @ static 0x0
+    return *reinterpret_cast<void**>(sf);
+}
+
+static void DoBecomeMurderer(void* local) {
+    if (!local || !IsUnityAlive(local)) return;
+    const auto role = static_cast<uint16_t>(RoleTypes::Impostor);
+
+    // Prefer networked RPC (works as host; may soft-apply as client)
+    using RpcFn = void (*)(void*, uint16_t, bool, const void*);
+    AsPtr<RpcFn>(PlayerControl_RpcSetRole)(local, role, true, nullptr);
+
+    // Also try RoleManager.SetRole for local assignment
+    void* rm = GetRoleManager();
+    if (rm && IsUnityAlive(rm)) {
+        using SetFn = void (*)(void*, void*, uint16_t, const void*);
+        AsPtr<SetFn>(RoleManager_SetRole)(rm, local, role, nullptr);
+    }
+
+    // Reset kill cooldown locally
+    *reinterpret_cast<float*>(reinterpret_cast<uintptr_t>(local) + PC_killTimer) = 0.f;
+
+    // Force CanUseKillButton on current role behaviour if present
+    void* data = Read<void*>(local, PC_CachedPlayerData);
+    if (data && IsUnityAlive(data)) {
+        void* roleBeh = Read<void*>(data, NPI_Role);
+        if (roleBeh && IsUnityAlive(roleBeh)) {
+            *reinterpret_cast<bool*>(reinterpret_cast<uintptr_t>(roleBeh) + RB_CanUseKillButton) = true;
+            *reinterpret_cast<int32_t*>(reinterpret_cast<uintptr_t>(roleBeh) + RB_TeamType) = 1;
+            *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(roleBeh) + RB_Role) =
+                static_cast<uint16_t>(RoleTypes::Impostor);
+        }
+        *reinterpret_cast<uint16_t*>(reinterpret_cast<uintptr_t>(data) + NPI_RoleType) =
+            static_cast<uint16_t>(RoleTypes::Impostor);
+    }
+    LOGI("become murderer applied");
+}
+
+static void ApplyNoclip(void* local, bool on) {
+    if (!local || !IsUnityAlive(local)) return;
+
+    // Disable player wall collider — classic Among Us noclip
+    void* col = Read<void*>(local, PC_Collider);
+    SetBehaviourEnabled(col, !on);
+
+    // Keep rigidbody simulated so movement still works; only collider off
+    // Optional: also toggle physics body collider path via MyPhysics.body — leave simulated on
+}
+
+void Game_ApplyCheats() {
+    if (!Il2CppReady() || !Il2CppAttachThread()) return;
+    int warm = g_WarmupTicks.load();
+    if (warm < 180) return;
+
+    void* local = GetLocalPlayer();
+    if (!local || !IsUnityAlive(local)) return;
+
+    // Noclip every tick so game scripts can't re-enable collider
+    ApplyNoclip(local, g_Cheat.noclip.load());
+
+    if (g_Cheat.becomeMurderPending.exchange(false)) {
+        DoBecomeMurderer(local);
+    }
+}
+
 static void* GetAllPlayersList() {
     void* ti = GetTypeInfo(PlayerControl_TypeInfo);
     if (!ti) return nullptr;

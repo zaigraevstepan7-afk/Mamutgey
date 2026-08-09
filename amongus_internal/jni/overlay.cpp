@@ -100,8 +100,9 @@ static void* TickThread(void*) {
     usleep(2500 * 1000);
     Il2CppAttachThread();
     while (!g_Stop.load()) {
+        Game_ApplyCheats();
         Game_TickCollect();
-        usleep(32 * 1000); // ~30 Hz — less pressure on Unity
+        usleep(32 * 1000); // ~30 Hz
     }
     return nullptr;
 }
@@ -240,10 +241,14 @@ static jboolean J_nativeGetMurderEsp(JNIEnv*, jclass) { return g_Cheat.murderEsp
 static jboolean J_nativeGetBox(JNIEnv*, jclass) { return g_Cheat.espBox.load(); }
 static jboolean J_nativeGetLine(JNIEnv*, jclass) { return g_Cheat.espLine.load(); }
 static jboolean J_nativeGetName(JNIEnv*, jclass) { return g_Cheat.espName.load(); }
+
+static void J_nativeSetNoclip(JNIEnv*, jclass, jboolean v) { g_Cheat.noclip.store(v); }
+static jboolean J_nativeGetNoclip(JNIEnv*, jclass) { return g_Cheat.noclip.load(); }
+static void J_nativeBecomeMurder(JNIEnv*, jclass) { g_Cheat.becomeMurderPending.store(true); }
+
 static void J_nativeSetViewSize(JNIEnv*, jclass, jint w, jint h) {
     if (w > 0) g_ViewW = w;
     if (h > 0) g_ViewH = h;
-    // Fallback so ESP scale is 1:1 until we know Unity screen size
     if (g_UnityW <= 0 && w > 0) g_UnityW = w;
     if (g_UnityH <= 0 && h > 0) g_UnityH = h;
 }
@@ -277,6 +282,9 @@ static JNINativeMethod g_Methods[] = {
     {const_cast<char*>("nativeGetBox"), const_cast<char*>("()Z"), (void*)J_nativeGetBox},
     {const_cast<char*>("nativeGetLine"), const_cast<char*>("()Z"), (void*)J_nativeGetLine},
     {const_cast<char*>("nativeGetName"), const_cast<char*>("()Z"), (void*)J_nativeGetName},
+    {const_cast<char*>("nativeSetNoclip"), const_cast<char*>("(Z)V"), (void*)J_nativeSetNoclip},
+    {const_cast<char*>("nativeGetNoclip"), const_cast<char*>("()Z"), (void*)J_nativeGetNoclip},
+    {const_cast<char*>("nativeBecomeMurder"), const_cast<char*>("()V"), (void*)J_nativeBecomeMurder},
     {const_cast<char*>("nativeSetViewSize"), const_cast<char*>("(II)V"), (void*)J_nativeSetViewSize},
     {const_cast<char*>("nativeLog"), const_cast<char*>("(Ljava/lang/String;)V"), (void*)J_nativeLog},
     {const_cast<char*>("nativePlayerCount"), const_cast<char*>("()I"), (void*)J_nativePlayerCount},
@@ -333,7 +341,7 @@ bool Overlay_Start(JavaVM* vm) {
 
     if (g_Alive.load()) return true;
 
-    OLOGI("BUILD=20260809i compact-drag");
+    OLOGI("BUILD=20260809j noclip-murder");
 
     jobject appCl = GetAppClassLoader(env);
     if (!appCl) return false;
