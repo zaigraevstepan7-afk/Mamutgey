@@ -3,7 +3,6 @@
 #include "overlay_dex.h"
 
 #include <android/log.h>
-#include <dlfcn.h>
 #include <jni.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -28,15 +27,11 @@ static int g_ViewW = 0, g_ViewH = 0;
 static std::mutex g_LabelMu;
 static std::vector<std::string> g_Labels;
 
-// ---- crash guard for IL2CPP reads on worker thread ----
 static thread_local sigjmp_buf g_Jmp;
 static thread_local volatile bool g_Guarding = false;
-static struct sigaction g_OldSegv{};
-static struct sigaction g_OldBus{};
 
-static void GuardHandler(int sig, siginfo_t*, void*) {
-    if (g_Guarding) siglongjmp(g_Jmp, sig);
-    // fall through to previous if possible
+static void GuardHandler(int, siginfo_t*, void*) {
+    if (g_Guarding) siglongjmp(g_Jmp, 1);
 }
 
 static void InstallGuard() {
@@ -44,8 +39,8 @@ static void InstallGuard() {
     sa.sa_sigaction = GuardHandler;
     sa.sa_flags = SA_SIGINFO;
     sigemptyset(&sa.sa_mask);
-    sigaction(SIGSEGV, &sa, &g_OldSegv);
-    sigaction(SIGBUS, &sa, &g_OldBus);
+    sigaction(SIGSEGV, &sa, nullptr);
+    sigaction(SIGBUS, &sa, nullptr);
 }
 
 static bool SafeTick() {
@@ -56,7 +51,6 @@ static bool SafeTick() {
         return true;
     }
     g_Guarding = false;
-    OLOGE("Game_TickCollect fault swallowed");
     return false;
 }
 
@@ -69,102 +63,121 @@ static JNIEnv* GetEnv() {
     return nullptr;
 }
 
-static jobject GetActivity(JNIEnv* env) {
-    jclass up = env->FindClass("com/unity3d/player/UnityPlayer");
-    if (!up) { env->ExceptionClear(); return nullptr; }
-    jfieldID fid = env->GetStaticFieldID(up, "currentActivity", "Landroid/app/Activity;");
-    if (!fid) { env->ExceptionClear(); return nullptr; }
-    return env->GetStaticObjectField(up, fid);
+/** App ClassLoader — CRITICAL for FindClass after Kitty inject. */
+static jobject GetAppClassLoader(JNIEnv* env) {
+    jclass at = env->FindClass("android/app/ActivityThread");
+    if (!at) { env->ExceptionClear(); OLOGE("ActivityThread missing"); return nullptr; }
+    jmethodID curApp = env->GetStaticMethodID(at, "currentApplication", "()Landroid/app/Application;");
+    if (!curApp) { env->ExceptionClear(); return nullptr; }
+    jobject app = env->CallStaticObjectMethod(at, curApp);
+    if (!app) { OLOGE("currentApplication() null"); return nullptr; }
+    jclass ctx = env->FindClass("android/content/Context");
+    jmethodID getCl = env->GetMethodID(ctx, "getClassLoader", "()Ljava/lang/ClassLoader;");
+    jobject cl = env->CallObjectMethod(app, getCl);
+    return cl;
 }
 
-// ---- JNI natives for AuOverlay ----
+static jclass LoadAppClass(JNIEnv* env, jobject classLoader, const char* name) {
+    if (!classLoader) return nullptr;
+    jclass clCls = env->FindClass("java/lang/ClassLoader");
+    jmethodID load = env->GetMethodID(clCls, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+    jstring jname = env->NewStringUTF(name);
+    jobject cls = env->CallObjectMethod(classLoader, load, jname);
+    env->DeleteLocalRef(jname);
+    if (!cls || env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        OLOGE("loadClass failed: %s", name);
+        return nullptr;
+    }
+    return (jclass)cls;
+}
+
+static jobject GetUnityActivity(JNIEnv* env, jobject classLoader) {
+    jclass up = LoadAppClass(env, classLoader, "com.unity3d.player.UnityPlayer");
+    if (!up) return nullptr;
+    jfieldID fid = env->GetStaticFieldID(up, "currentActivity", "Landroid/app/Activity;");
+    if (!fid) {
+        env->ExceptionClear();
+        OLOGE("UnityPlayer.currentActivity field missing");
+        return nullptr;
+    }
+    jobject act = env->GetStaticObjectField(up, fid);
+    if (!act) OLOGE("UnityPlayer.currentActivity is null (open the game fully first)");
+    return act;
+}
+
+static void ShowToast(JNIEnv* env, jobject activity, const char* msg) {
+    if (!activity) return;
+    jclass toastCls = env->FindClass("android/widget/Toast");
+    jmethodID make = env->GetStaticMethodID(toastCls, "makeText",
+        "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;");
+    jmethodID show = env->GetMethodID(toastCls, "show", "()V");
+    jstring jmsg = env->NewStringUTF(msg);
+    jobject toast = env->CallStaticObjectMethod(toastCls, make, activity, jmsg, 1 /* LONG */);
+    if (toast) env->CallVoidMethod(toast, show);
+    env->DeleteLocalRef(jmsg);
+}
+
+// ---- JNI natives ----
 static jint J_nativeEspCount(JNIEnv*, jclass) {
     std::lock_guard<std::mutex> lk(g_EspMutex);
     int n = 0;
     for (auto& p : g_EspSnapshot) {
-        if (p.isLocal) continue;
-        if (!p.onScreen) continue;
-        const bool showMurder = g_Cheat.murderEspEnabled && p.isMurder;
-        const bool showNormal = g_Cheat.espEnabled;
-        if (!showMurder && !showNormal) continue;
-        ++n;
-        if (n >= 16) break;
+        if (p.isLocal || !p.onScreen) continue;
+        if (!(g_Cheat.espEnabled || (g_Cheat.murderEspEnabled && p.isMurder))) continue;
+        if (++n >= 16) break;
     }
     return n;
 }
 
 static void J_nativeEspFill(JNIEnv* env, jclass, jfloatArray arr) {
     if (!arr) return;
-    const int maxN = 16;
     float tmp[16 * 8]{};
     std::vector<std::string> labels;
-    labels.reserve(16);
-
-    int w = g_ViewW;
     int h = g_ViewH;
     {
         std::lock_guard<std::mutex> lk(g_EspMutex);
         int idx = 0;
         for (auto& p : g_EspSnapshot) {
-            if (idx >= maxN) break;
+            if (idx >= 16) break;
             if (p.isLocal || !p.onScreen) continue;
-            const bool showMurder = g_Cheat.murderEspEnabled && p.isMurder;
-            const bool showNormal = g_Cheat.espEnabled;
-            if (!showMurder && !showNormal) continue;
+            bool showMurder = g_Cheat.murderEspEnabled && p.isMurder;
+            if (!g_Cheat.espEnabled && !showMurder) continue;
 
             float sx = p.screen.x;
             float sy = (h > 0) ? (h - p.screen.y) : p.screen.y;
             float scale = std::clamp(220.0f / std::max(p.distance, 0.35f), 28.0f, 140.0f);
-            float top = sy - scale;
-            float bot = sy;
-
-            float r = 0.3f, g = 0.75f, b = 1.f, a = 1.f;
-            float flags = 1.f;
-            if (showMurder && p.isMurder) {
-                r = 1.f; g = 0.15f; b = 0.15f; flags = 2.f;
-            } else if (p.isDead) {
-                r = g = b = 0.6f;
-            }
+            float r = 0.3f, g = 0.75f, b = 1.f, a = 1.f, flags = 1.f;
+            if (showMurder) { r = 1.f; g = 0.15f; b = 0.15f; flags = 2.f; }
 
             int o = idx * 8;
-            tmp[o + 0] = sx;
-            tmp[o + 1] = top;
-            tmp[o + 2] = bot;
-            tmp[o + 3] = r;
-            tmp[o + 4] = g;
-            tmp[o + 5] = b;
-            tmp[o + 6] = a;
-            tmp[o + 7] = (g_Cheat.espBox || g_Cheat.espLine || g_Cheat.espName) ? flags : 0.f;
+            tmp[o]=sx; tmp[o+1]=sy-scale; tmp[o+2]=sy;
+            tmp[o+3]=r; tmp[o+4]=g; tmp[o+5]=b; tmp[o+6]=a; tmp[o+7]=flags;
 
-            char buf[192];
-            buf[0] = 0;
-            if (g_Cheat.espName) {
+            char buf[192]{};
+            if (g_Cheat.espName)
                 snprintf(buf, sizeof(buf), "%s", p.name.empty() ? "Player" : p.name.c_str());
-            }
             if (g_Cheat.espRole) {
                 char t[64];
-                snprintf(t, sizeof(t), "%s[%s]", buf[0] ? " " : "", Offsets::RoleName(p.role));
-                size_t used = strlen(buf);
-                if (used + 1 < sizeof(buf)) strncat(buf, t, sizeof(buf) - used - 1);
+                snprintf(t, sizeof(t), "%s[%s]", buf[0]?" ":"", Offsets::RoleName(p.role));
+                size_t u = strlen(buf);
+                if (u+1 < sizeof(buf)) strncat(buf, t, sizeof(buf)-u-1);
             }
-            if (showMurder && p.isMurder) {
-                size_t used = strlen(buf);
-                if (used + 1 < sizeof(buf)) strncat(buf, " *MURDER*", sizeof(buf) - used - 1);
+            if (showMurder) {
+                size_t u = strlen(buf);
+                if (u+1 < sizeof(buf)) strncat(buf, " *MURDER*", sizeof(buf)-u-1);
             }
             labels.emplace_back(buf);
             ++idx;
         }
     }
-
     {
         std::lock_guard<std::mutex> lk(g_LabelMu);
         g_Labels.swap(labels);
     }
-
-    jsize len = env->GetArrayLength(arr);
-    jsize n = std::min(len, (jsize)(maxN * 8));
+    jsize n = std::min(env->GetArrayLength(arr), (jsize)(16 * 8));
     env->SetFloatArrayRegion(arr, 0, n, tmp);
-    (void)w;
 }
 
 static jstring J_nativeEspLabel(JNIEnv* env, jclass, jint index) {
@@ -177,17 +190,10 @@ static void J_nativeSetEsp(JNIEnv*, jclass, jboolean v) { g_Cheat.espEnabled = v
 static void J_nativeSetMurderEsp(JNIEnv*, jclass, jboolean v) { g_Cheat.murderEspEnabled = v; }
 static void J_nativeSetBox(JNIEnv*, jclass, jboolean v) { g_Cheat.espBox = v; }
 static void J_nativeSetLine(JNIEnv*, jclass, jboolean v) { g_Cheat.espLine = v; }
-static void J_nativeSetName(JNIEnv*, jclass, jboolean v) {
-    g_Cheat.espName = v;
-    g_Cheat.espRole = v;
-}
+static void J_nativeSetName(JNIEnv*, jclass, jboolean v) { g_Cheat.espName = v; g_Cheat.espRole = v; }
 static jboolean J_nativeGetEsp(JNIEnv*, jclass) { return g_Cheat.espEnabled; }
 static jboolean J_nativeGetMurderEsp(JNIEnv*, jclass) { return g_Cheat.murderEspEnabled; }
-
-static void J_nativeSetViewSize(JNIEnv*, jclass, jint w, jint h) {
-    g_ViewW = w;
-    g_ViewH = h;
-}
+static void J_nativeSetViewSize(JNIEnv*, jclass, jint w, jint h) { g_ViewW = w; g_ViewH = h; }
 
 static JNINativeMethod g_Methods[] = {
     {const_cast<char*>("nativeEspCount"), const_cast<char*>("()I"), (void*)J_nativeEspCount},
@@ -203,8 +209,7 @@ static JNINativeMethod g_Methods[] = {
     {const_cast<char*>("nativeSetViewSize"), const_cast<char*>("(II)V"), (void*)J_nativeSetViewSize},
 };
 
-static jclass LoadOverlayClass(JNIEnv* env) {
-    // ByteBuffer.wrap(dex)
+static jclass LoadOverlayClass(JNIEnv* env, jobject appCl) {
     jclass bbCls = env->FindClass("java/nio/ByteBuffer");
     jmethodID wrap = env->GetStaticMethodID(bbCls, "wrap", "([B)Ljava/nio/ByteBuffer;");
     jbyteArray arr = env->NewByteArray((jsize)au_overlay_dex_len);
@@ -212,24 +217,18 @@ static jclass LoadOverlayClass(JNIEnv* env) {
                             reinterpret_cast<const jbyte*>(au_overlay_dex));
     jobject buf = env->CallStaticObjectMethod(bbCls, wrap, arr);
 
-    // parent = activity classloader
-    jobject activity = GetActivity(env);
-    if (!activity) return nullptr;
-    jclass ctxCls = env->FindClass("android/content/Context");
-    jmethodID getCl = env->GetMethodID(ctxCls, "getClassLoader", "()Ljava/lang/ClassLoader;");
-    jobject parent = env->CallObjectMethod(activity, getCl);
-
     jclass imdex = env->FindClass("dalvik/system/InMemoryDexClassLoader");
     if (!imdex) {
         env->ExceptionClear();
-        OLOGE("InMemoryDexClassLoader missing");
+        OLOGE("InMemoryDexClassLoader not available");
         return nullptr;
     }
     jmethodID ctor = env->GetMethodID(imdex, "<init>", "(Ljava/nio/ByteBuffer;Ljava/lang/ClassLoader;)V");
-    jobject loader = env->NewObject(imdex, ctor, buf, parent);
+    jobject loader = env->NewObject(imdex, ctor, buf, appCl);
     if (!loader || env->ExceptionCheck()) {
         env->ExceptionDescribe();
         env->ExceptionClear();
+        OLOGE("InMemoryDexClassLoader ctor failed");
         return nullptr;
     }
 
@@ -240,9 +239,10 @@ static jclass LoadOverlayClass(JNIEnv* env) {
     if (!clsObj || env->ExceptionCheck()) {
         env->ExceptionDescribe();
         env->ExceptionClear();
-        OLOGE("loadClass AuOverlay failed");
+        OLOGE("loadClass au.overlay.AuOverlay failed");
         return nullptr;
     }
+    OLOGI("AuOverlay class loaded OK");
     return (jclass)env->NewGlobalRef(clsObj);
 }
 
@@ -250,41 +250,42 @@ static void* TickThread(void*) {
     InstallGuard();
     while (!g_Stop.load()) {
         SafeTick();
-        // update view size from snapshot path using DisplayMetrics if needed
         usleep(16 * 1000);
     }
     return nullptr;
 }
 
 bool Overlay_IsAlive() { return g_Alive.load(); }
-
-void Overlay_Shutdown() {
-    g_Stop.store(true);
-    g_Alive.store(false);
-}
+void Overlay_Shutdown() { g_Stop.store(true); g_Alive.store(false); }
 
 bool Overlay_Start(JavaVM* vm) {
     g_VM = vm;
     JNIEnv* env = GetEnv();
     if (!env) {
-        OLOGE("Overlay_Start: no JNIEnv");
+        OLOGE("Overlay_Start: AttachCurrentThread failed");
         return false;
     }
 
-    // wait for activity
+    jobject appCl = GetAppClassLoader(env);
+    if (!appCl) return false;
+    OLOGI("app ClassLoader OK");
+
     jobject activity = nullptr;
-    for (int i = 0; i < 200; ++i) {
-        activity = GetActivity(env);
+    for (int i = 0; i < 150; ++i) {
+        activity = GetUnityActivity(env, appCl);
         if (activity) break;
-        usleep(50 * 1000);
+        usleep(100 * 1000);
     }
     if (!activity) {
-        OLOGE("Unity currentActivity is null");
+        OLOGE("no Unity activity after wait");
         return false;
     }
-    OLOGI("Unity activity OK, loading overlay dex (%u bytes)", au_overlay_dex_len);
+    OLOGI("Unity activity acquired");
 
-    jclass ovl = LoadOverlayClass(env);
+    // Early toast from native (may need UI thread — try anyway + Java will toast too)
+    // Defer toast to Java start()
+
+    jclass ovl = LoadOverlayClass(env, appCl);
     if (!ovl) return false;
 
     if (env->RegisterNatives(ovl, g_Methods, (jint)(sizeof(g_Methods) / sizeof(g_Methods[0]))) != 0) {
@@ -293,18 +294,19 @@ bool Overlay_Start(JavaVM* vm) {
         OLOGE("RegisterNatives failed");
         return false;
     }
+    OLOGI("RegisterNatives OK");
 
     jmethodID start = env->GetStaticMethodID(ovl, "start", "(Landroid/app/Activity;)V");
     if (!start) {
         env->ExceptionClear();
-        OLOGE("AuOverlay.start missing");
+        OLOGE("AuOverlay.start method missing");
         return false;
     }
     env->CallStaticVoidMethod(ovl, start, activity);
     if (env->ExceptionCheck()) {
         env->ExceptionDescribe();
         env->ExceptionClear();
-        OLOGE("AuOverlay.start threw");
+        OLOGE("AuOverlay.start exception");
         return false;
     }
 
@@ -313,6 +315,6 @@ bool Overlay_Start(JavaVM* vm) {
     pthread_t t;
     pthread_create(&t, nullptr, TickThread, nullptr);
     pthread_detach(t);
-    OLOGI("Android overlay started (MENU button on left)");
+    OLOGI("overlay start() called — expect Toast + red MENU");
     return true;
 }

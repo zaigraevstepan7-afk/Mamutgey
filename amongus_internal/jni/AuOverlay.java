@@ -5,12 +5,13 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.PixelFormat;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
-import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.CompoundButton;
@@ -18,22 +19,27 @@ import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 /**
- * Overlay attached to Activity content view — works with GLES and Vulkan.
+ * Floating menu via WindowManager.TYPE_APPLICATION_PANEL (above Unity SurfaceView).
  */
 public class AuOverlay {
     private static Activity activity;
-    private static PassThroughRoot root;
-    private static EspView espView;
+    private static WindowManager wm;
+    private static WindowManager.LayoutParams fabLp;
+    private static WindowManager.LayoutParams panelLp;
+    private static WindowManager.LayoutParams espLp;
     private static Button fab;
     private static ScrollView panel;
+    private static EspView espView;
     private static boolean menuOpen = false;
+    private static boolean attached = false;
     private static final Handler ui = new Handler(Looper.getMainLooper());
     private static final Runnable ticker = new Runnable() {
         @Override public void run() {
             if (espView != null) espView.postInvalidate();
-            if (root != null) ui.postDelayed(this, 16);
+            if (attached) ui.postDelayed(this, 16);
         }
     };
 
@@ -58,62 +64,86 @@ public class AuOverlay {
                     attachLocked();
                 } catch (Throwable t) {
                     t.printStackTrace();
+                    try {
+                        Toast.makeText(act, "AU overlay FAIL: " + t.getMessage(), Toast.LENGTH_LONG).show();
+                    } catch (Throwable ignored) {}
                 }
             }
         });
     }
 
     private static void attachLocked() {
-        if (root != null || activity == null) return;
+        if (attached || activity == null) return;
+
+        wm = activity.getWindowManager();
         Context ctx = activity;
 
-        root = new PassThroughRoot(ctx);
-        root.setLayoutParams(new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT));
-
+        // ESP fullscreen (not touchable)
         espView = new EspView(ctx);
-        espView.setClickable(false);
-        root.addView(espView, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT));
+        espLp = baseParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT);
+        espLp.flags |= WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE;
+        espLp.gravity = Gravity.TOP | Gravity.START;
+        setToken(espLp);
+        wm.addView(espView, espLp);
 
+        // FAB — big red button
         fab = new Button(ctx);
         fab.setText("MENU");
         fab.setTextColor(Color.WHITE);
-        fab.setTextSize(16f);
+        fab.setTextSize(18f);
         fab.setAllCaps(true);
         fab.setBackgroundColor(0xF0E53935);
-        fab.setPadding(dp(ctx, 18), dp(ctx, 18), dp(ctx, 18), dp(ctx, 18));
-        FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(
-                dp(ctx, 88), dp(ctx, 88));
-        flp.gravity = Gravity.START | Gravity.CENTER_VERTICAL;
-        flp.leftMargin = dp(ctx, 12);
-        root.addView(fab, flp);
-        root.setInteractive(fab);
+        fabLp = baseParams(dp(ctx, 96), dp(ctx, 96));
+        fabLp.gravity = Gravity.START | Gravity.CENTER_VERTICAL;
+        fabLp.x = dp(ctx, 16);
+        fabLp.y = 0;
+        setToken(fabLp);
+        wm.addView(fab, fabLp);
 
+        // Panel
         panel = buildPanel(ctx);
+        panelLp = baseParams(dp(ctx, 320), WindowManager.LayoutParams.WRAP_CONTENT);
+        panelLp.gravity = Gravity.CENTER;
+        setToken(panelLp);
         panel.setVisibility(View.GONE);
-        FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(
-                dp(ctx, 300), ViewGroup.LayoutParams.WRAP_CONTENT);
-        plp.gravity = Gravity.CENTER;
-        root.addView(panel, plp);
-        root.setPanel(panel);
+        wm.addView(panel, panelLp);
 
         fab.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 menuOpen = !menuOpen;
                 panel.setVisibility(menuOpen ? View.VISIBLE : View.GONE);
                 fab.setText(menuOpen ? "CLOSE" : "MENU");
+                try {
+                    wm.updateViewLayout(panel, panelLp);
+                } catch (Throwable ignored) {}
             }
         });
 
-        ViewGroup content = activity.findViewById(android.R.id.content);
-        if (content == null) {
-            throw new IllegalStateException("android.R.id.content missing");
-        }
-        content.addView(root);
+        attached = true;
         ui.post(ticker);
+        Toast.makeText(activity, "AU CHEAT OK — tap MENU", Toast.LENGTH_LONG).show();
+    }
+
+    private static void setToken(WindowManager.LayoutParams lp) {
+        try {
+            View decor = activity.getWindow().getDecorView();
+            lp.token = decor.getWindowToken();
+        } catch (Throwable ignored) {}
+    }
+
+    private static WindowManager.LayoutParams baseParams(int w, int h) {
+        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                w,
+                h,
+                WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                        | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                PixelFormat.TRANSLUCENT);
+        lp.format = PixelFormat.TRANSLUCENT;
+        return lp;
     }
 
     private static ScrollView buildPanel(Context ctx) {
@@ -124,7 +154,7 @@ public class AuOverlay {
         box.setBackgroundColor(0xF014141C);
 
         TextView title = new TextView(ctx);
-        title.setText("Among Us Internal\n2026.6.5 / Kitty");
+        title.setText("Among Us Internal\n2026.6.5");
         title.setTextColor(Color.WHITE);
         title.setTextSize(16f);
         box.addView(title);
@@ -163,34 +193,6 @@ public class AuOverlay {
         return Math.round(v * ctx.getResources().getDisplayMetrics().density);
     }
 
-    /** Root that only steals touches on FAB / open panel. */
-    public static class PassThroughRoot extends FrameLayout {
-        private View fabRef;
-        private View panelRef;
-
-        public PassThroughRoot(Context ctx) { super(ctx); }
-        public void setInteractive(View fab) { fabRef = fab; }
-        public void setPanel(View panel) { panelRef = panel; }
-
-        private boolean hit(View v, MotionEvent ev) {
-            if (v == null || v.getVisibility() != VISIBLE) return false;
-            int[] loc = new int[2];
-            v.getLocationOnScreen(loc);
-            float x = ev.getRawX();
-            float y = ev.getRawY();
-            return x >= loc[0] && x <= loc[0] + v.getWidth()
-                    && y >= loc[1] && y <= loc[1] + v.getHeight();
-        }
-
-        @Override
-        public boolean dispatchTouchEvent(MotionEvent ev) {
-            if (hit(fabRef, ev) || hit(panelRef, ev)) {
-                return super.dispatchTouchEvent(ev);
-            }
-            return false;
-        }
-    }
-
     public static class EspView extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -201,7 +203,6 @@ public class AuOverlay {
             setWillNotDraw(false);
             setBackgroundColor(Color.TRANSPARENT);
             text.setTextSize(32f);
-            text.setColor(Color.WHITE);
             text.setShadowLayer(4f, 1f, 1f, Color.BLACK);
         }
 
@@ -209,6 +210,11 @@ public class AuOverlay {
         protected void onSizeChanged(int w, int h, int oldw, int oldh) {
             super.onSizeChanged(w, h, oldw, oldh);
             try { nativeSetViewSize(w, h); } catch (Throwable ignored) {}
+        }
+
+        @Override
+        public boolean onTouchEvent(MotionEvent event) {
+            return false;
         }
 
         @Override
