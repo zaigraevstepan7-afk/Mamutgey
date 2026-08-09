@@ -131,11 +131,48 @@ static jint J_nativeEspCount(JNIEnv*, jclass) {
     return n;
 }
 
+static void ColorFor(const EspPlayer& p, bool murder, float& r, float& g, float& b) {
+    if (murder) { r = 1.f; g = 0.22f; b = 0.22f; return; }
+    // Among Us classic palette (approx)
+    static const float kPal[][3] = {
+        {0.78f, 0.07f, 0.07f}, // red
+        {0.07f, 0.18f, 0.82f}, // blue
+        {0.07f, 0.50f, 0.18f}, // green
+        {0.93f, 0.33f, 0.73f}, // pink
+        {0.94f, 0.49f, 0.05f}, // orange
+        {0.96f, 0.96f, 0.34f}, // yellow
+        {0.25f, 0.28f, 0.30f}, // black
+        {0.84f, 0.88f, 0.95f}, // white
+        {0.42f, 0.18f, 0.74f}, // purple
+        {0.44f, 0.29f, 0.12f}, // brown
+        {0.22f, 1.00f, 0.87f}, // cyan
+        {0.31f, 0.94f, 0.22f}, // lime
+    };
+    int id = p.colorId;
+    if (id < 0 || id >= 12) { r = 0.35f; g = 0.80f; b = 1.f; return; }
+    r = kPal[id][0]; g = kPal[id][1]; b = kPal[id][2];
+}
+
+static int g_UnityW = 0, g_UnityH = 0;
+
+static void RefreshUnityScreenSize() {
+    if (!UBase) return;
+    using Fn = int (*)(const void*);
+    g_UnityW = AsPtr<Fn>(0x441B53C)(nullptr);
+    g_UnityH = AsPtr<Fn>(0x441B564)(nullptr);
+}
+
 static void J_nativeEspFill(JNIEnv* env, jclass, jfloatArray arr) {
     if (!arr) return;
-    float tmp[16 * 8]{};
+    RefreshUnityScreenSize();
+    // stride 10: sx, top, bot, r,g,b,a, flags, unused, unused
+    float tmp[16 * 10]{};
     std::vector<std::string> labels;
-    int h = g_ViewH;
+    int vw = g_ViewW > 0 ? g_ViewW : g_UnityW;
+    int vh = g_ViewH > 0 ? g_ViewH : g_UnityH;
+    float sxScale = (g_UnityW > 0 && vw > 0) ? (float)vw / (float)g_UnityW : 1.f;
+    float syScale = (g_UnityH > 0 && vh > 0) ? (float)vh / (float)g_UnityH : 1.f;
+
     {
         std::lock_guard<std::mutex> lk(g_EspMutex);
         int idx = 0;
@@ -145,28 +182,48 @@ static void J_nativeEspFill(JNIEnv* env, jclass, jfloatArray arr) {
             bool showMurder = g_Cheat.murderEspEnabled && p.isMurder;
             if (!g_Cheat.espEnabled && !showMurder) continue;
 
-            float sx = p.screen.x;
-            float sy = (h > 0) ? (h - p.screen.y) : p.screen.y;
-            float scale = std::clamp(220.0f / std::max(p.distance, 0.35f), 28.0f, 140.0f);
-            float r = 0.3f, g = 0.75f, b = 1.f, a = 1.f, flags = 1.f;
-            if (showMurder) { r = 1.f; g = 0.15f; b = 0.15f; flags = 2.f; }
+            float sx = p.screen.x * sxScale;
+            float syUnity = p.screen.y * syScale;
+            float sy = (vh > 0) ? (vh - syUnity) : syUnity;
 
-            int o = idx * 8;
-            tmp[o]=sx; tmp[o+1]=sy-scale; tmp[o+2]=sy;
-            tmp[o+3]=r; tmp[o+4]=g; tmp[o+5]=b; tmp[o+6]=a; tmp[o+7]=flags;
+            // Among Us is mostly orthographic top-down; scale box by distance
+            float scale = std::clamp(200.0f / std::max(p.distance, 0.4f), 26.0f, 130.0f);
+            float top = sy - scale;
+            float bot = sy;
+
+            float r, g, b, a = 1.f;
+            ColorFor(p, showMurder, r, g, b);
+
+            int flags = 0;
+            if (g_Cheat.espBox) flags |= 1;
+            if (g_Cheat.espLine) flags |= 2;
+            if (showMurder) flags |= 4;
+            if (g_Cheat.espName || g_Cheat.espRole) flags |= 8;
+            if (!flags) continue;
+
+            int o = idx * 10;
+            tmp[o] = sx; tmp[o+1] = top; tmp[o+2] = bot;
+            tmp[o+3] = r; tmp[o+4] = g; tmp[o+5] = b; tmp[o+6] = a;
+            tmp[o+7] = (float)flags;
 
             char buf[192]{};
             if (g_Cheat.espName)
                 snprintf(buf, sizeof(buf), "%s", p.name.empty() ? "Player" : p.name.c_str());
             if (g_Cheat.espRole) {
                 char t[64];
-                snprintf(t, sizeof(t), "%s[%s]", buf[0]?" ":"", Offsets::RoleName(p.role));
+                snprintf(t, sizeof(t), "%s[%s]", buf[0] ? " " : "", Offsets::RoleName(p.role));
                 size_t u = strlen(buf);
-                if (u+1 < sizeof(buf)) strncat(buf, t, sizeof(buf)-u-1);
+                if (u + 1 < sizeof(buf)) strncat(buf, t, sizeof(buf) - u - 1);
+            }
+            if (g_Cheat.espDistance) {
+                char t[32];
+                snprintf(t, sizeof(t), " %.1f", p.distance);
+                size_t u = strlen(buf);
+                if (u + 1 < sizeof(buf)) strncat(buf, t, sizeof(buf) - u - 1);
             }
             if (showMurder) {
                 size_t u = strlen(buf);
-                if (u+1 < sizeof(buf)) strncat(buf, " *MURDER*", sizeof(buf)-u-1);
+                if (u + 1 < sizeof(buf)) strncat(buf, " IMP", sizeof(buf) - u - 1);
             }
             labels.emplace_back(buf);
             ++idx;
@@ -176,7 +233,7 @@ static void J_nativeEspFill(JNIEnv* env, jclass, jfloatArray arr) {
         std::lock_guard<std::mutex> lk(g_LabelMu);
         g_Labels.swap(labels);
     }
-    jsize n = std::min(env->GetArrayLength(arr), (jsize)(16 * 8));
+    jsize n = std::min(env->GetArrayLength(arr), (jsize)(16 * 10));
     env->SetFloatArrayRegion(arr, 0, n, tmp);
 }
 
@@ -190,17 +247,31 @@ static void J_nativeSetEsp(JNIEnv*, jclass, jboolean v) { g_Cheat.espEnabled = v
 static void J_nativeSetMurderEsp(JNIEnv*, jclass, jboolean v) { g_Cheat.murderEspEnabled = v; }
 static void J_nativeSetBox(JNIEnv*, jclass, jboolean v) { g_Cheat.espBox = v; }
 static void J_nativeSetLine(JNIEnv*, jclass, jboolean v) { g_Cheat.espLine = v; }
-static void J_nativeSetName(JNIEnv*, jclass, jboolean v) { g_Cheat.espName = v; g_Cheat.espRole = v; }
+static void J_nativeSetName(JNIEnv*, jclass, jboolean v) {
+    g_Cheat.espName = v;
+    g_Cheat.espRole = v;
+    g_Cheat.espDistance = v;
+}
 static jboolean J_nativeGetEsp(JNIEnv*, jclass) { return g_Cheat.espEnabled; }
 static jboolean J_nativeGetMurderEsp(JNIEnv*, jclass) { return g_Cheat.murderEspEnabled; }
+static jboolean J_nativeGetBox(JNIEnv*, jclass) { return g_Cheat.espBox; }
+static jboolean J_nativeGetLine(JNIEnv*, jclass) { return g_Cheat.espLine; }
+static jboolean J_nativeGetName(JNIEnv*, jclass) { return g_Cheat.espName; }
 static void J_nativeSetViewSize(JNIEnv*, jclass, jint w, jint h) { g_ViewW = w; g_ViewH = h; }
 static void J_nativeLog(JNIEnv* env, jclass, jstring msg) {
     if (!msg) return;
     const char* c = env->GetStringUTFChars(msg, nullptr);
-    if (c) {
-        OLOGI("[java] %s", c);
-        env->ReleaseStringUTFChars(msg, c);
-    }
+    if (c) { OLOGI("[java] %s", c); env->ReleaseStringUTFChars(msg, c); }
+}
+static jint J_nativePlayerCount(JNIEnv*, jclass) {
+    std::lock_guard<std::mutex> lk(g_EspMutex);
+    return (jint)g_EspSnapshot.size();
+}
+static jint J_nativeMurderCount(JNIEnv*, jclass) {
+    std::lock_guard<std::mutex> lk(g_EspMutex);
+    int n = 0;
+    for (auto& p : g_EspSnapshot) if (p.isMurder && !p.isLocal) ++n;
+    return n;
 }
 
 static JNINativeMethod g_Methods[] = {
@@ -214,8 +285,13 @@ static JNINativeMethod g_Methods[] = {
     {const_cast<char*>("nativeSetName"), const_cast<char*>("(Z)V"), (void*)J_nativeSetName},
     {const_cast<char*>("nativeGetEsp"), const_cast<char*>("()Z"), (void*)J_nativeGetEsp},
     {const_cast<char*>("nativeGetMurderEsp"), const_cast<char*>("()Z"), (void*)J_nativeGetMurderEsp},
+    {const_cast<char*>("nativeGetBox"), const_cast<char*>("()Z"), (void*)J_nativeGetBox},
+    {const_cast<char*>("nativeGetLine"), const_cast<char*>("()Z"), (void*)J_nativeGetLine},
+    {const_cast<char*>("nativeGetName"), const_cast<char*>("()Z"), (void*)J_nativeGetName},
     {const_cast<char*>("nativeSetViewSize"), const_cast<char*>("(II)V"), (void*)J_nativeSetViewSize},
     {const_cast<char*>("nativeLog"), const_cast<char*>("(Ljava/lang/String;)V"), (void*)J_nativeLog},
+    {const_cast<char*>("nativePlayerCount"), const_cast<char*>("()I"), (void*)J_nativePlayerCount},
+    {const_cast<char*>("nativeMurderCount"), const_cast<char*>("()I"), (void*)J_nativeMurderCount},
 };
 
 static jclass LoadOverlayClass(JNIEnv* env, jobject appCl) {
