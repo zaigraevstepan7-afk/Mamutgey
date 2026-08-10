@@ -1,0 +1,16 @@
+Pixel Gun 3D Android dump target
+Version: 26.10.2 (versionCode 626974)
+Package: com.pixel.gun3d
+ABI: arm64-v8a
+Unity: 2021.3.48f1 (from libil2cpp strings)
+APK source: APKPure/APKMirror arm64 26.10.2
+
+NOTE: On-disk global-metadata.dat is ENCRYPTED (4096-byte stub).
+libil2cpp.so exports are STRIPPED. Offline Il2CppDumper FAILS.
+
+Runtime dump required: inject libpg_dump.so / libpg_internal.so into a running
+game process (AndKittyInjector). Decrypted metadata lives in memory after il2cpp_init;
+xdl recovers hidden API symbols from the loaded image.
+
+Old PC cheat reference (ESP logic): https://github.com/stanuwu/PixelGunCheatInternal
+  PlayerMoveC.Update hook -> transform @ myPlayerTransform, nickLabel TextMesh, W2S
